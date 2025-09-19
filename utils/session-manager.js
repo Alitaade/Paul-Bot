@@ -236,44 +236,51 @@ class WhatsAppSessionManager {
     }
   }
 
-  async _handleConnectionOpen(sock, sessionId, userId, callbacks) {
-    if (!sock) return
-    
-    const phoneNumber = sock?.user?.id?.split('@')[0]
-    
-    // RENDER: Save connection with auth state for pterodactyl detection
-    const authState = sock.authState?.creds || null
-    
-    await this.storage.updateSession(sessionId, {
-      isConnected: true,
-      phoneNumber: phoneNumber ? `+${phoneNumber}` : null,
-      connectionStatus: 'connected',
-      reconnectAttempts: 0,
-      source: 'web',
-      detected: false // Pterodactyl will detect this
-    })
+async _handleConnectionOpen(sock, sessionId, userId, callbacks) {
+  if (!sock) return
+  
+  const phoneNumber = sock?.user?.id?.split('@')[0]
+  
+  // RENDER: Get auth state properly
+  const authState = sock.authState?.state?.creds || sock.user || null
+  
+  await this.storage.updateSession(sessionId, {
+    isConnected: true,
+    phoneNumber: phoneNumber ? `+${phoneNumber}` : null,
+    connectionStatus: 'connected',
+    reconnectAttempts: 0,
+    source: 'web',
+    detected: false
+  })
 
-    // RENDER: Save auth state separately for pterodactyl
-    if (authState) {
-      await this.storage.saveAuthState(sessionId, authState)
-    }
+  // RENDER: Save auth state for pterodactyl detection
+// In _handleConnectionOpen, replace the saveAuthState call:
+if (sock.authState?.state) {
+  await this.storage.updateSession(sessionId, {
+    authState: sock.authState.state
+  })
+} else if (sock.user) {
+  // Fallback - save user info as auth state
+  await this.storage.updateSession(sessionId, {
+    authState: { creds: sock.user }
+  })
+}
 
-    logger.info(`RENDER: ✓ ${sessionId} connected (+${phoneNumber || 'unknown'}) - Ready for pterodactyl detection`)
+  logger.info(`RENDER: ✓ ${sessionId} connected (+${phoneNumber || 'unknown'}) - Ready for pterodactyl detection`)
 
-    // RENDER: Remove pairing code as connection is successful
-    this.pairingCodes.delete(sessionId)
-    
-    if (callbacks?.onConnected) {
-      callbacks.onConnected(sock)
-    }
-
-    // RENDER: Auto cleanup socket after successful connection (pterodactyl will handle messages)
-    setTimeout(() => {
-      logger.info(`RENDER: Auto-cleanup socket ${sessionId} - pterodactyl will handle messages`)
-      this._cleanupSocket(sessionId, sock)
-      this.activeSockets.delete(sessionId)
-    }, 10000) // 10 second delay to ensure data is saved
+  this.pairingCodes.delete(sessionId)
+  
+  if (callbacks?.onConnected) {
+    callbacks.onConnected(sock)
   }
+
+  // Keep socket alive longer for auth state to be properly saved
+  setTimeout(() => {
+    logger.info(`RENDER: Auto-cleanup socket ${sessionId}`)
+    this._cleanupSocket(sessionId, sock)
+    this.activeSockets.delete(sessionId)
+  }, 15000) // Increased to 15 seconds
+}
 
   async _handleConnectionClose(sessionId, lastDisconnect, callbacks) {
     const reason = lastDisconnect?.error?.message || 'Unknown'
@@ -452,5 +459,4 @@ export function getSessionManager() {
 }
 
 export const sessionManager = getSessionManager()
-
 export default getSessionManager
