@@ -1,6 +1,6 @@
 // RENDER: Lightweight WhatsApp Session Manager - Connection Only (No Event Handlers)
 import { makeWASocket, useMultiFileAuthState } from "@whiskeysockets/baileys"
-import { baileysConfig } from "./config/baileys.js"
+import { baileysConfig } from "./baileys.js"
 import { SessionStorage } from "./session-storage.js"
 import { useMongoDBAuthState } from "./mongodb-auth-state.js"
 import { logger } from "./logger.js"
@@ -452,4 +452,5 @@ export function getSessionManager() {
 }
 
 export const sessionManager = getSessionManager()
+
 export default getSessionManager
