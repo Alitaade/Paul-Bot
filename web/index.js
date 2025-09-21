@@ -423,29 +423,35 @@ onConnected: async (sock) => {
   }
 
   async checkConnectionStatus(req, res) {
-    try {
-      const { sessionId } = req.params
-      
-      if (!sessionId.startsWith('session_')) {
-        return res.status(400).json({ error: 'Invalid session ID' })
-      }
-
-      const isConnected = await this.sessionManager.isReallyConnected(sessionId)
-      const session = await this.storage.getSession(sessionId)
-      
-      res.json({
-        isConnected,
-        phoneNumber: session?.phoneNumber || null,
-        connectionStatus: session?.connectionStatus || 'disconnected',
-        source: session?.source || 'web',
-        detected: session?.detected || false
-      })
-
-    } catch (error) {
-      logger.error('RENDER: Connection status check error:', error)
-      res.status(500).json({ error: 'Status check failed' })
+  try {
+    const { sessionId } = req.params
+    
+    if (!sessionId.startsWith('session_')) {
+      return res.status(400).json({ error: 'Invalid session ID' })
     }
+
+    // Check both render and database status
+    const renderConnected = await this.sessionManager.isReallyConnected(sessionId)
+    const session = await this.storage.getSession(sessionId)
+    
+    // Use the most recent status information
+    const isConnected = renderConnected || (session?.isConnected && session?.connectionStatus === 'connected')
+    
+    logger.info(`RENDER: Status check for ${sessionId} - Render: ${renderConnected}, DB: ${session?.isConnected}, Final: ${isConnected}`)
+    
+    res.json({
+      isConnected,
+      phoneNumber: session?.phoneNumber || null,
+      connectionStatus: session?.connectionStatus || 'disconnected',
+      source: session?.source || 'web',
+      detected: session?.detected || false
+    })
+
+  } catch (error) {
+    logger.error('RENDER: Connection status check error:', error)
+    res.status(500).json({ error: 'Status check failed' })
   }
+}
   
   // HTML templates
   getHTML(page, data = {}) {
