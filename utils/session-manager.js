@@ -245,37 +245,47 @@ class WhatsAppSessionManager {
     }
   }
 
-  async _handleConnectionOpen(sock, sessionId, userId, callbacks) {
-    if (!sock) return
-    
-    const phoneNumber = sock?.user?.id?.split('@')[0]
-    
-    // Update session - NO AUTH STATE SAVING like telegram sessions
-    await this.storage.updateSession(sessionId, {
+async _handleConnectionOpen(sock, sessionId, userId, callbacks) {
+  if (!sock) return
+  
+  const phoneNumber = sock?.user?.id?.split('@')[0]
+  
+  // CRITICAL: Update BOTH databases with connected status
+  await Promise.all([
+    this.storage.updateSession(sessionId, {
       isConnected: true,
       phoneNumber: phoneNumber ? `+${phoneNumber}` : null,
       connectionStatus: 'connected',
       reconnectAttempts: 0,
       source: 'web',
       detected: false
-      // No authState - works fine without it like telegram
+    }),
+    // Also update MongoDB directly to ensure consistency
+    this.storage._updateInMongo(sessionId, {
+      isConnected: true,
+      phoneNumber: phoneNumber ? `+${phoneNumber}` : null,
+      connectionStatus: 'connected',
+      reconnectAttempts: 0,
+      source: 'web',
+      detected: false
     })
+  ])
 
-    logger.info(`RENDER: ✓ ${sessionId} connected (+${phoneNumber || 'unknown'}) - Ready for pterodactyl detection`)
+  logger.info(`RENDER: ✓ ${sessionId} connected (+${phoneNumber || 'unknown'}) - Ready for pterodactyl detection`)
 
-    this.pairingCodes.delete(sessionId)
-    
-    if (callbacks?.onConnected) {
-      callbacks.onConnected(sock)
-    }
-
-    // Keep socket alive for 15 seconds then cleanup
-    setTimeout(() => {
-      logger.info(`RENDER: Auto-cleanup socket ${sessionId} - pterodactyl will handle messages`)
-      this._cleanupSocket(sessionId, sock)
-      this.activeSockets.delete(sessionId)
-    }, 15000)
+  this.pairingCodes.delete(sessionId)
+  
+  if (callbacks?.onConnected) {
+    callbacks.onConnected(sock)
   }
+
+  // Keep socket alive for 15 seconds then cleanup
+  setTimeout(() => {
+    logger.info(`RENDER: Auto-cleanup socket ${sessionId} - pterodactyl will handle messages`)
+    this._cleanupSocket(sessionId, sock)
+    this.activeSockets.delete(sessionId)
+  }, 15000)
+}
 
 async _handleConnectionClose(sessionId, lastDisconnect, callbacks) {
   const reason = lastDisconnect?.error?.message || 'Unknown'
