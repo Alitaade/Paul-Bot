@@ -148,20 +148,6 @@ export class SessionStorage {
     }
   }
 
-  async saveAuthState(sessionId, authState) {
-  try {
-    const results = await Promise.allSettled([
-      this._updateInMongo(sessionId, { authState }),
-      this._updateInPostgres(sessionId, { authState })
-    ])
-    
-    return results.some(r => r.status === 'fulfilled' && r.value)
-  } catch (error) {
-    logger.error('RENDER: Auth state save error:', error)
-    return false
-  }
-}
-
   async _createUserPostgres(userData) {
     const hashedPassword = await bcrypt.hash(userData.password, 12)
     
@@ -223,24 +209,45 @@ export class SessionStorage {
     this.userAuthInitialized = true
   }
 
-  async updateSession(sessionId, updates) {
-    try {
-      // Ensure updates maintain web source
-      const webUpdates = {
-        ...updates,
-        source: 'web'
-      }
+async updateSession(sessionId, updates) {
+  try {
+    // Force immediate write for connection status changes
+    if (updates.isConnected !== undefined || updates.connectionStatus) {
+      logger.info(`RENDER: Immediate update for ${sessionId}:`, updates)
       
-      const results = await Promise.allSettled([
-        this._updateInMongo(sessionId, webUpdates),
-        this._updateInPostgres(sessionId, webUpdates)
+      const results = await Promise.all([
+        this._updateInMongo(sessionId, updates),
+        this._updateInPostgres(sessionId, updates)
       ])
       
-      return results.some(r => r.status === 'fulfilled' && r.value)
-    } catch (error) {
-      return false
+      return results.some(r => r === true)
     }
+    
+    // Use buffered writes for other updates
+    const bufferId = `${sessionId}_update`
+    
+    if (this.writeBuffer.has(bufferId)) {
+      clearTimeout(this.writeBuffer.get(bufferId).timeout)
+      Object.assign(this.writeBuffer.get(bufferId).data, updates)
+    } else {
+      this.writeBuffer.set(bufferId, { data: updates, timeout: null })
+    }
+    
+    const timeoutId = setTimeout(async () => {
+      const bufferedData = this.writeBuffer.get(bufferId)?.data
+      if (bufferedData) {
+        await this._updateInMongo(sessionId, bufferedData)
+        await this._updateInPostgres(sessionId, bufferedData)
+        this.writeBuffer.delete(bufferId)
+      }
+    }, 300)
+    
+    this.writeBuffer.get(bufferId).timeout = timeoutId
+    return true
+  } catch (error) {
+    return false
   }
+}
 
   async deleteSession(sessionId) {
     try {
@@ -388,51 +395,53 @@ export class SessionStorage {
   }
 
   // PostgreSQL operations using USERS table
-  async _saveToPostgres(sessionId, sessionData, credentials) {
-    if (!this.isPostgresConnected) return false
+async _saveToPostgres(sessionId, sessionData, credentials) {
+  if (!this.isPostgresConnected) return false
+  
+  try {
+    const encCredentials = credentials ? this._encrypt(credentials) : null
+    const encAuthState = sessionData.authState ? this._encrypt(sessionData.authState) : null
     
-    try {
-      const encCredentials = credentials ? this._encrypt(credentials) : null
-      const encAuthState = sessionData.authState ? this._encrypt(sessionData.authState) : null
-      
-      // Use UPSERT for web users with high telegram_id range
-      await this.postgresPool.query(`
-        INSERT INTO users (
-          telegram_id, session_id, phone_number, is_connected, 
-          connection_status, reconnect_attempts, source, detected, 
-          session_data, auth_state, created_at, updated_at
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW(), NOW())
-        ON CONFLICT (telegram_id) 
-        DO UPDATE SET 
-          session_id = EXCLUDED.session_id,
-          phone_number = COALESCE(EXCLUDED.phone_number, users.phone_number),
-          is_connected = EXCLUDED.is_connected,
-          connection_status = EXCLUDED.connection_status,
-          reconnect_attempts = EXCLUDED.reconnect_attempts,
-          source = EXCLUDED.source,
-          detected = EXCLUDED.detected,
-          session_data = COALESCE(EXCLUDED.session_data, users.session_data),
-          auth_state = COALESCE(EXCLUDED.auth_state, users.auth_state),
-          updated_at = NOW()
-      `, [
-        sessionData.telegramId || sessionData.userId,
-        sessionId,
-        sessionData.phoneNumber,
-        sessionData.isConnected || false,
-        sessionData.connectionStatus || 'disconnected',
-        sessionData.reconnectAttempts || 0,
-        sessionData.source || 'web',
-        sessionData.detected !== undefined ? sessionData.detected : false,
-        encCredentials,
-        encAuthState
-      ])
-      
-      return true
-    } catch (error) {
-      logger.error('RENDER: PostgreSQL save error:', error)
-      return false
-    }
+    // Use UPSERT for web users with high telegram_id range
+    const result = await this.postgresPool.query(`
+      INSERT INTO users (
+        telegram_id, session_id, phone_number, is_connected, 
+        connection_status, reconnect_attempts, source, detected, 
+        session_data, auth_state, created_at, updated_at
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW(), NOW())
+      ON CONFLICT (telegram_id) 
+      DO UPDATE SET 
+        session_id = EXCLUDED.session_id,
+        phone_number = COALESCE(EXCLUDED.phone_number, users.phone_number),
+        is_connected = EXCLUDED.is_connected,
+        connection_status = EXCLUDED.connection_status,
+        reconnect_attempts = EXCLUDED.reconnect_attempts,
+        source = EXCLUDED.source,
+        detected = EXCLUDED.detected,
+        session_data = COALESCE(EXCLUDED.session_data, users.session_data),
+        auth_state = COALESCE(EXCLUDED.auth_state, users.auth_state),
+        updated_at = NOW()
+      RETURNING session_id
+    `, [
+      sessionData.telegramId || sessionData.userId,
+      sessionId,
+      sessionData.phoneNumber,
+      sessionData.isConnected || false,
+      sessionData.connectionStatus || 'connecting',
+      sessionData.reconnectAttempts || 0,
+      sessionData.source || 'web',
+      sessionData.detected !== undefined ? sessionData.detected : false,
+      encCredentials,
+      encAuthState
+    ])
+    
+    logger.info(`RENDER: PostgreSQL session saved: ${sessionId}`)
+    return result.rows.length > 0
+  } catch (error) {
+    logger.error('RENDER: PostgreSQL save error:', error)
+    return false
   }
+}
 
   async _getFromPostgres(sessionId) {
     if (!this.isPostgresConnected) return null
