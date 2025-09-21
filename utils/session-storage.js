@@ -2,6 +2,7 @@ import { MongoClient } from 'mongodb'
 import crypto from 'crypto'
 import { logger } from './logger.js'
 import bcrypt from 'bcryptjs'
+
 export class SessionStorage {
   constructor() {
     this.client = null
@@ -109,105 +110,104 @@ export class SessionStorage {
       return null
     }
   }
-  
-  // ADD these methods to the SessionStorage class:
 
-async createUser(userData) {
-  try {
-    if (this.isPostgresConnected) {
-      return await this._createUserPostgres(userData)
+  // Web user management methods
+  async createUser(userData) {
+    try {
+      if (this.isPostgresConnected) {
+        return await this._createUserPostgres(userData)
+      }
+      throw new Error('No database connection available')
+    } catch (error) {
+      logger.error('RENDER: Create user error:', error)
+      throw error
     }
-    throw new Error('No database connection available')
-  } catch (error) {
-    logger.error('RENDER: Create user error:', error)
-    throw error
   }
-}
 
-async getUserByPhone(phoneNumber) {
-  try {
-    if (this.isPostgresConnected) {
-      return await this._getUserByPhonePostgres(phoneNumber)
+  async getUserByPhone(phoneNumber) {
+    try {
+      if (this.isPostgresConnected) {
+        return await this._getUserByPhonePostgres(phoneNumber)
+      }
+      return null
+    } catch (error) {
+      logger.error('RENDER: Get user by phone error:', error)
+      return null
     }
-    return null
-  } catch (error) {
-    logger.error('RENDER: Get user by phone error:', error)
-    return null
   }
-}
 
-async getUserById(userId) {
-  try {
-    if (this.isPostgresConnected) {
-      return await this._getUserByIdPostgres(userId)
+  async getUserById(userId) {
+    try {
+      if (this.isPostgresConnected) {
+        return await this._getUserByIdPostgres(userId)
+      }
+      return null
+    } catch (error) {
+      logger.error('RENDER: Get user by ID error:', error)
+      return null
     }
-    return null
-  } catch (error) {
-    logger.error('RENDER: Get user by ID error:', error)
-    return null
   }
-}
 
-async _createUserPostgres(userData) {
-  const hashedPassword = await import('bcryptjs').then(bcrypt => bcrypt.hash(userData.password, 12))
-  
-  // Generate a unique positive telegram_id for web users (9 billion range)
-  const webTelegramId = Math.floor(Math.random() * 1000000000) + 9000000000
-  
-  // Initialize web_users_auth table if not exists
-  await this._initWebUsersAuth()
-  
-  const result = await this.postgresPool.query(`
-    INSERT INTO users (telegram_id, first_name, phone_number, username, is_active, created_at)
-    VALUES ($1, $2, $3, $4, true, NOW())
-    RETURNING id, telegram_id, first_name, phone_number, username, created_at
-  `, [webTelegramId, userData.name, userData.phoneNumber, `web_${userData.name.toLowerCase().replace(/\s+/g, '_')}`])
-  
-  await this.postgresPool.query(`
-    INSERT INTO web_users_auth (user_id, password_hash) VALUES ($1, $2)
-    ON CONFLICT (user_id) DO UPDATE SET password_hash = $2, updated_at = NOW()
-  `, [result.rows[0].id, hashedPassword])
-  
-  return result.rows[0]
-}
+  async _createUserPostgres(userData) {
+    const hashedPassword = await bcrypt.hash(userData.password, 12)
+    
+    // Generate a unique positive telegram_id for web users (9 billion range)
+    const webTelegramId = Math.floor(Math.random() * 1000000000) + 9000000000
+    
+    // Initialize web_users_auth table if not exists
+    await this._initWebUsersAuth()
+    
+    const result = await this.postgresPool.query(`
+      INSERT INTO users (telegram_id, first_name, phone_number, username, is_active, source, created_at)
+      VALUES ($1, $2, $3, $4, true, 'web', NOW())
+      RETURNING id, telegram_id, first_name, phone_number, username, created_at
+    `, [webTelegramId, userData.name, userData.phoneNumber, `web_${userData.name.toLowerCase().replace(/\s+/g, '_')}`])
+    
+    await this.postgresPool.query(`
+      INSERT INTO web_users_auth (user_id, password_hash) VALUES ($1, $2)
+      ON CONFLICT (user_id) DO UPDATE SET password_hash = $2, updated_at = NOW()
+    `, [result.rows[0].id, hashedPassword])
+    
+    return result.rows[0]
+  }
 
-async _getUserByPhonePostgres(phoneNumber) {
-  const result = await this.postgresPool.query(`
-    SELECT u.id, u.telegram_id, u.first_name as name, u.phone_number, 
-           u.username, u.created_at, u.updated_at, w.password_hash
-    FROM users u
-    LEFT JOIN web_users_auth w ON u.id = w.user_id
-    WHERE u.phone_number = $1 AND u.telegram_id > 9000000000
-  `, [phoneNumber])
-  
-  return result.rows[0] || null
-}
+  async _getUserByPhonePostgres(phoneNumber) {
+    const result = await this.postgresPool.query(`
+      SELECT u.id, u.telegram_id, u.first_name as name, u.phone_number, 
+             u.username, u.created_at, u.updated_at, w.password_hash
+      FROM users u
+      LEFT JOIN web_users_auth w ON u.id = w.user_id
+      WHERE u.phone_number = $1 AND u.telegram_id >= 9000000000
+    `, [phoneNumber])
+    
+    return result.rows[0] || null
+  }
 
-async _getUserByIdPostgres(userId) {
-  const result = await this.postgresPool.query(`
-    SELECT u.id, u.telegram_id, u.first_name as name, u.phone_number, 
-           u.username, u.created_at, u.updated_at
-    FROM users u
-    WHERE u.id = $1 AND u.telegram_id > 9000000000
-  `, [userId])
-  
-  return result.rows[0] || null
-}
+  async _getUserByIdPostgres(userId) {
+    const result = await this.postgresPool.query(`
+      SELECT u.id, u.telegram_id, u.first_name as name, u.phone_number, 
+             u.username, u.created_at, u.updated_at
+      FROM users u
+      WHERE u.id = $1 AND u.telegram_id >= 9000000000
+    `, [userId])
+    
+    return result.rows[0] || null
+  }
 
-async _initWebUsersAuth() {
-  if (this.userAuthInitialized) return
-  
-  await this.postgresPool.query(`
-    CREATE TABLE IF NOT EXISTS web_users_auth (
-      user_id BIGINT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
-      password_hash VARCHAR(255) NOT NULL,
-      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-    )
-  `)
-  
-  this.userAuthInitialized = true
-}
+  async _initWebUsersAuth() {
+    if (this.userAuthInitialized) return
+    
+    await this.postgresPool.query(`
+      CREATE TABLE IF NOT EXISTS web_users_auth (
+        user_id BIGINT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+        password_hash VARCHAR(255) NOT NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `)
+    
+    this.userAuthInitialized = true
+  }
 
   async updateSession(sessionId, updates) {
     try {
@@ -373,7 +373,7 @@ async _initWebUsersAuth() {
     }
   }
 
-  // PostgreSQL operations using USERS table instead of sessions
+  // PostgreSQL operations using USERS table
   async _saveToPostgres(sessionId, sessionData, credentials) {
     if (!this.isPostgresConnected) return false
     
@@ -381,32 +381,36 @@ async _initWebUsersAuth() {
       const encCredentials = credentials ? this._encrypt(credentials) : null
       const encAuthState = sessionData.authState ? this._encrypt(sessionData.authState) : null
       
-      // Update users table with session data based on telegram_id
+      // Use UPSERT for web users with high telegram_id range
       await this.postgresPool.query(`
-        UPDATE users 
-        SET 
-          session_id = $1,
-          phone_number = COALESCE($2, phone_number),
-          is_connected = $3,
-          connection_status = $4,
-          reconnect_attempts = $5,
-          source = $6,
-          detected = $7,
-          session_data = COALESCE($8, session_data),
-          auth_state = COALESCE($9, auth_state),
+        INSERT INTO users (
+          telegram_id, session_id, phone_number, is_connected, 
+          connection_status, reconnect_attempts, source, detected, 
+          session_data, auth_state, created_at, updated_at
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW(), NOW())
+        ON CONFLICT (telegram_id) 
+        DO UPDATE SET 
+          session_id = EXCLUDED.session_id,
+          phone_number = COALESCE(EXCLUDED.phone_number, users.phone_number),
+          is_connected = EXCLUDED.is_connected,
+          connection_status = EXCLUDED.connection_status,
+          reconnect_attempts = EXCLUDED.reconnect_attempts,
+          source = EXCLUDED.source,
+          detected = EXCLUDED.detected,
+          session_data = COALESCE(EXCLUDED.session_data, users.session_data),
+          auth_state = COALESCE(EXCLUDED.auth_state, users.auth_state),
           updated_at = NOW()
-        WHERE telegram_id = $10
       `, [
+        sessionData.telegramId || sessionData.userId,
         sessionId,
         sessionData.phoneNumber,
         sessionData.isConnected || false,
         sessionData.connectionStatus || 'disconnected',
         sessionData.reconnectAttempts || 0,
         sessionData.source || 'web',
-        sessionData.detected || false,
+        sessionData.detected !== undefined ? sessionData.detected : false,
         encCredentials,
-        encAuthState,
-        sessionData.telegramId || sessionData.userId
+        encAuthState
       ])
       
       return true
@@ -458,17 +462,17 @@ async _initWebUsersAuth() {
       Object.keys(updates).forEach(key => {
         if (updates[key] !== undefined) {
           if (key === 'credentials') {
-            setParts.push(`session_data = $${paramIndex++}`)
+            setParts.push(`session_data = ${paramIndex++}`)
             values.push(updates[key] ? this._encrypt(updates[key]) : null)
           } else if (key === 'authState') {
-            setParts.push(`auth_state = $${paramIndex++}`)
+            setParts.push(`auth_state = ${paramIndex++}`)
             values.push(updates[key] ? this._encrypt(updates[key]) : null)
           } else {
             const columnName = key === 'isConnected' ? 'is_connected' : 
                              key === 'connectionStatus' ? 'connection_status' :
                              key === 'phoneNumber' ? 'phone_number' :
                              key === 'reconnectAttempts' ? 'reconnect_attempts' : key
-            setParts.push(`${columnName} = $${paramIndex++}`)
+            setParts.push(`${columnName} = ${paramIndex++}`)
             values.push(updates[key])
           }
         }
@@ -545,20 +549,6 @@ async _initWebUsersAuth() {
       }))
     } catch (error) {
       return []
-    }
-  }
-
-  // RENDER-SPECIFIC: Save auth state for pterodactyl detection
-  async saveAuthState(sessionId, authState) {
-    try {
-      const results = await Promise.allSettled([
-        this._updateInMongo(sessionId, { authState }),
-        this._updateInPostgres(sessionId, { authState })
-      ])
-      
-      return results.some(r => r.status === 'fulfilled' && r.value)
-    } catch (error) {
-      return false
     }
   }
 
