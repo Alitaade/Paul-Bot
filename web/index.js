@@ -350,16 +350,13 @@ async getUserById(userId) {
             logger.info(`RENDER: QR code generated for ${sessionId}`)
           },
           
-          onConnected: async (sock) => {
-            logger.info(`RENDER: WhatsApp connection successful for telegram_id ${telegramId}: ${phoneNumber}`)
-            this.pendingConnections.delete(sessionId)
-            
-            // RENDER: Store auth state for pterodactyl detection
-            if (sock.authState?.creds) {
-              await this.storage.saveAuthState(sessionId, sock.authState.creds)
-              logger.info(`RENDER: Auth state saved for pterodactyl detection: ${sessionId}`)
-            }
-          },
+onConnected: async (sock) => {
+  logger.info(`RENDER: WhatsApp connection successful for telegram_id ${telegramId}: ${phoneNumber}`)
+  this.pendingConnections.delete(sessionId)
+  
+  // RENDER: Auth state is already saved in _handleConnectionOpen
+  logger.info(`RENDER: Connection complete for ${sessionId}`)
+},
           
           onError: (error) => {
             clearTimeout(timeout)
