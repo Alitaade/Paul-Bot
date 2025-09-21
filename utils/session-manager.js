@@ -219,28 +219,34 @@ class RenderWhatsAppSessionManager {
     }
   }
 
-  async _handleConnectionOpen(sock, sessionId, callbacks) {
-    if (!sock) return
-    
-    this.voluntarilyDisconnected.delete(sessionId)
-    const phoneNumber = sock?.user?.id?.split('@')[0]
-    
+async _handleConnectionOpen(sock, sessionId, callbacks) {
+  if (!sock) return
+  
+  this.voluntarilyDisconnected.delete(sessionId)
+  const phoneNumber = sock?.user?.id?.split('@')[0]
+  
+  // FIXED: Ensure the database update actually happens
+  try {
     await this.storage.updateSession(sessionId, {
       isConnected: true,
       phoneNumber: phoneNumber ? `+${phoneNumber}` : null,
-      connectionStatus: 'connected'
+      connectionStatus: 'connected',
+      reconnectAttempts: 0 // Reset reconnect attempts on successful connection
     })
 
-    logger.info(`RENDER: ✓ ${sessionId} connected (+${phoneNumber || 'unknown'})`)
-
-    if (callbacks?.onConnected) {
-      callbacks.onConnected(sock)
-    }
-
-    // RENDER SPECIFIC: Schedule auto-cleanup after 15 seconds
-    // This allows Pterodactyl to detect and take over the session
-    this._scheduleAutoCleanup(sessionId, 15000)
+    logger.info(`RENDER: ✓ ${sessionId} connected (+${phoneNumber || 'unknown'}) - Database updated`)
+  } catch (error) {
+    logger.error(`RENDER: Failed to update database for ${sessionId}:`, error)
   }
+
+  if (callbacks?.onConnected) {
+    callbacks.onConnected(sock)
+  }
+
+  // RENDER SPECIFIC: Schedule auto-cleanup after 15 seconds
+  // This allows Pterodactyl to detect and take over the session
+  this._scheduleAutoCleanup(sessionId, 15000)
+}
 
   _scheduleAutoCleanup(sessionId, delay) {
     // Clear any existing cleanup timer
