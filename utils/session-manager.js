@@ -4,7 +4,7 @@ import { Boom } from "@hapi/boom"
 import { baileysConfig } from "./baileys.js"
 import { SessionStorage } from "./session-storage.js"
 import { useMongoDBAuthState } from "./mongodb-auth-state.js"
-import { createComponentLogger } from '../../utils/logger.js'
+import { createComponentLogger } from './logger.js'
 import path from 'path'
 import fs from 'fs'
 
