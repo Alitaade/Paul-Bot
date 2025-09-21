@@ -277,22 +277,48 @@ class WhatsAppSessionManager {
     }, 15000)
   }
 
-  async _handleConnectionClose(sessionId, lastDisconnect, callbacks) {
-    const reason = lastDisconnect?.error?.message || 'Unknown'
-    logger.info(`RENDER: ✗ ${sessionId} disconnected: ${reason}`)
-    
-    await this.storage.updateSession(sessionId, { 
-      isConnected: false,
-      connectionStatus: 'disconnected'
-    })
-    
-    // RENDER: No reconnection logic - one-time pairing only
+async _handleConnectionClose(sessionId, lastDisconnect, callbacks) {
+  const reason = lastDisconnect?.error?.message || 'Unknown'
+  logger.info(`RENDER: ✗ ${sessionId} disconnected: ${reason}`)
+  
+  await this.storage.updateSession(sessionId, { 
+    isConnected: false,
+    connectionStatus: 'disconnected'
+  })
+  
+  // RENDER: Check if should reconnect (like Pterodactyl does)
+  const shouldReconnect = this._shouldReconnect(lastDisconnect, sessionId)
+  if (shouldReconnect) {
+    logger.info(`RENDER: Will reconnect ${sessionId} - ${reason}`)
+    setTimeout(() => this._reconnectSession(sessionId, callbacks), 3000)
+  } else {
+    logger.info(`RENDER: Will not reconnect ${sessionId} - ${reason}`)
     await this.disconnectSession(sessionId, true)
     
     if (callbacks?.onError) {
       callbacks.onError(new Error(`Connection failed: ${reason}`))
     }
   }
+}
+
+  _shouldReconnect(lastDisconnect, sessionId) {
+  if (!lastDisconnect?.error) return true
+  
+  const reason = lastDisconnect.error.message || ''
+  
+  // RENDER: Reconnect on stream errors (like Pterodactyl does)
+  if (reason.includes('Stream Errored') || reason.includes('restart required')) {
+    return true
+  }
+  
+  // RENDER: Don't reconnect on permanent failures
+  if (reason.includes('QR timeout') || reason.includes('logged out')) {
+    return false
+  }
+  
+  return true
+}
+  
 
   // RENDER: Simplified cleanup
   _cleanupSocket(sessionId, sock) {
@@ -462,4 +488,5 @@ export function getSessionManager() {
 
 export const sessionManager = getSessionManager()
 export default getSessionManager
+
 
