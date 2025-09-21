@@ -275,19 +275,74 @@ class RenderWhatsAppSessionManager {
     this.cleanupTimers.set(sessionId, timer)
   }
 
-  async _handleConnectionClose(sessionId, lastDisconnect, callbacks) {
-    const reason = lastDisconnect?.error?.message || 'Unknown'
-    
-    logger.info(`RENDER: ✗ ${sessionId} disconnected: ${reason}`)
-    
-    await this.storage.updateSession(sessionId, { 
-      isConnected: false,
-      connectionStatus: 'disconnected'
-    })
-    
-    // Don't reconnect in Render - let Pterodactyl handle it
+async _handleConnectionClose(sessionId, lastDisconnect, callbacks) {
+  const reason = lastDisconnect?.error?.message || 'Unknown'
+  
+  logger.info(`RENDER: ✗ ${sessionId} disconnected: ${reason}`)
+  
+  await this.storage.updateSession(sessionId, { 
+    isConnected: false,
+    connectionStatus: 'disconnected'
+  })
+  
+  // FIXED: Check if we should reconnect before cleaning up
+  const shouldReconnect = await this._shouldReconnect(lastDisconnect, sessionId)
+  if (shouldReconnect) {
+    setTimeout(() => this._reconnectDirect(sessionId, callbacks), 5000)
+  } else {
     await this.disconnectSession(sessionId, true)
   }
+}
+
+async _shouldReconnect(lastDisconnect, sessionId) {
+  if (!lastDisconnect?.error || !(lastDisconnect.error instanceof Boom)) {
+    return true
+  }
+  
+  const statusCode = lastDisconnect.error.output?.statusCode
+  const session = await this.storage.getSession(sessionId)
+  const reconnectCount = session?.reconnectAttempts || 0
+  
+  const permanentDisconnects = [
+    DisconnectReason.loggedOut,
+    DisconnectReason.badSession,
+    DisconnectReason.multideviceMismatch
+  ]
+  
+  if (statusCode === 515) return reconnectCount < 3 // Lower retry count for Render
+  if (statusCode === 440) {
+    logger.info(`RENDER: ${sessionId} QR timeout - session will not auto-reconnect`)
+    return false
+  }
+  
+  if (statusCode === 401) {
+    return false // Don't reconnect on auth failure
+  }
+  
+  return !permanentDisconnects.includes(statusCode) && reconnectCount < 3
+}
+
+async _reconnectDirect(sessionId, callbacks) {
+  try {
+    const session = await this.storage.getSession(sessionId)
+    if (!session) return
+
+    const newAttempts = (session.reconnectAttempts || 0) + 1
+    await this.storage.updateSession(sessionId, {
+      reconnectAttempts: newAttempts,
+      connectionStatus: 'reconnecting'
+    })
+
+    logger.info(`RENDER: Reconnecting ${sessionId} (attempt #${newAttempts})`)
+    
+    await this.createSession(session.userId, session.phoneNumber, callbacks, true, session.source)
+    
+  } catch (error) {
+    logger.error(`RENDER: Reconnect failed for ${sessionId}:`, error)
+    // Don't retry recursively - let it fail and clean up
+    await this.disconnectSession(sessionId, true)
+  }
+}
 
   async disconnectSession(sessionId, forceCleanup = false) {
     this.initializingSessions.delete(sessionId)
