@@ -287,9 +287,6 @@ async getUserById(userId) {
         return res.status(400).json({ error: 'This phone number is already in use' })
       }
 
-      // Clean up any stale data
-      await this.sessionManager.performCompleteUserCleanup(sessionId)
-
       // Generate pairing code using telegram_id
       const result = await this.generatePairingCode(telegramId, phoneValidation.formatted)
       
