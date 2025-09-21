@@ -90,7 +90,7 @@ export class SessionStorage {
 
   async _initPostgres() {
     try {
-      const { pool } = await import('../../config/database.js')
+      const { pool } = await import('./database.js')
       this.postgresPool = pool
       
       const client = await this.postgresPool.connect()
