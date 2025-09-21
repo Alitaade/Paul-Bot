@@ -1,5 +1,5 @@
 // WhatsApp pairing utility
-import { logger } from "./utils/logger.js";
+import { logger } from "./logger.js";
 
 export async function handlePairing(
   sock,
