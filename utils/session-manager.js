@@ -21,7 +21,7 @@ class WhatsAppSessionManager {
     this.pairingCodes = new Map() // Store pairing codes for web interface
     
     // RENDER CONFIG - Connection only, no message processing
-    this.maxSessions = 10 // Lower limit for render
+    this.maxSessions = 40 // Lower limit for render
     this.isInitialized = false
     this.eventHandlersEnabled = false // ALWAYS FALSE for render
     
@@ -95,14 +95,7 @@ class WhatsAppSessionManager {
       
       const sock = makeWASocket({
         auth: state,
-        ...baileysConfig,
-        printQRInTerminal: false,
-        qrTimeout: 60000, // 60 seconds QR timeout
-        shouldSyncHistoryMessage: () => false, // Don't sync history on render
-        shouldIgnoreJid: () => false,
-        markOnlineOnConnect: false,
-        syncFullHistory: false,
-        defaultQueryTimeoutMs: 30_000
+        ...baileysConfig
       })
 
       // RENDER SPECIFIC: Minimal socket configuration
@@ -464,4 +457,5 @@ export function getSessionManager() {
 
 export const sessionManager = getSessionManager()
 export default getSessionManager
+
 
