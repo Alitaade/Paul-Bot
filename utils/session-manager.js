@@ -250,6 +250,9 @@ async _handleConnectionOpen(sock, sessionId, userId, callbacks) {
   
   const phoneNumber = sock?.user?.id?.split('@')[0]
   
+  // The auth state is already being saved automatically via the saveCreds callback
+  // that was set up in _configureSocket, so we don't need manual intervention
+  
   // CRITICAL: Update BOTH databases with connected status
   await Promise.all([
     this.storage.updateSession(sessionId, {
