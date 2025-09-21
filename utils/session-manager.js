@@ -1,4 +1,4 @@
-// RENDER: Lightweight WhatsApp Session Manager - Connection Only (No Event Handlers)
+// RENDER: Complete WhatsApp Session Manager - Web Pairing Only
 import { makeWASocket, useMultiFileAuthState } from "@whiskeysockets/baileys"
 import { baileysConfig } from "./baileys.js"
 import { SessionStorage } from "./session-storage.js"
@@ -95,7 +95,14 @@ class WhatsAppSessionManager {
       
       const sock = makeWASocket({
         auth: state,
-        ...baileysConfig
+        ...baileysConfig,
+        printQRInTerminal: false,
+        qrTimeout: 60000, // 60 seconds QR timeout
+        shouldSyncHistoryMessage: () => false, // Don't sync history on render
+        shouldIgnoreJid: () => false,
+        markOnlineOnConnect: false,
+        syncFullHistory: false,
+        defaultQueryTimeoutMs: 30_000
       })
 
       // RENDER SPECIFIC: Minimal socket configuration
@@ -236,51 +243,47 @@ class WhatsAppSessionManager {
     }
   }
 
-async _handleConnectionOpen(sock, sessionId, userId, callbacks) {
-  if (!sock) return
-  
-  const phoneNumber = sock?.user?.id?.split('@')[0]
-  
-  // RENDER: Get auth state properly
-  const authState = sock.authState?.state?.creds || sock.user || null
-  
-  await this.storage.updateSession(sessionId, {
-    isConnected: true,
-    phoneNumber: phoneNumber ? `+${phoneNumber}` : null,
-    connectionStatus: 'connected',
-    reconnectAttempts: 0,
-    source: 'web',
-    detected: false
-  })
+  async _handleConnectionOpen(sock, sessionId, userId, callbacks) {
+    if (!sock) return
+    
+    const phoneNumber = sock?.user?.id?.split('@')[0]
+    
+    // RENDER: Get and save auth state properly for pterodactyl detection
+    let authStateToSave = null
+    
+    // Try to get auth state from multiple sources
+    if (sock.authState?.creds) {
+      authStateToSave = sock.authState.creds
+    } else if (sock.user) {
+      authStateToSave = { creds: sock.user }
+    }
+    
+    // Update session with connection status and auth state
+    await this.storage.updateSession(sessionId, {
+      isConnected: true,
+      phoneNumber: phoneNumber ? `+${phoneNumber}` : null,
+      connectionStatus: 'connected',
+      reconnectAttempts: 0,
+      source: 'web',
+      detected: false,
+      authState: authStateToSave // Save auth state for pterodactyl
+    })
 
-  // RENDER: Save auth state for pterodactyl detection
-// In _handleConnectionOpen, replace the saveAuthState call:
-if (sock.authState?.state) {
-  await this.storage.updateSession(sessionId, {
-    authState: sock.authState.state
-  })
-} else if (sock.user) {
-  // Fallback - save user info as auth state
-  await this.storage.updateSession(sessionId, {
-    authState: { creds: sock.user }
-  })
-}
+    logger.info(`RENDER: ✓ ${sessionId} connected (+${phoneNumber || 'unknown'}) - Ready for pterodactyl detection`)
 
-  logger.info(`RENDER: ✓ ${sessionId} connected (+${phoneNumber || 'unknown'}) - Ready for pterodactyl detection`)
+    this.pairingCodes.delete(sessionId)
+    
+    if (callbacks?.onConnected) {
+      callbacks.onConnected(sock)
+    }
 
-  this.pairingCodes.delete(sessionId)
-  
-  if (callbacks?.onConnected) {
-    callbacks.onConnected(sock)
+    // Keep socket alive longer for auth state to be properly saved
+    setTimeout(() => {
+      logger.info(`RENDER: Auto-cleanup socket ${sessionId} - pterodactyl will handle messages`)
+      this._cleanupSocket(sessionId, sock)
+      this.activeSockets.delete(sessionId)
+    }, 15000) // 15 seconds to ensure data is saved
   }
-
-  // Keep socket alive longer for auth state to be properly saved
-  setTimeout(() => {
-    logger.info(`RENDER: Auto-cleanup socket ${sessionId}`)
-    this._cleanupSocket(sessionId, sock)
-    this.activeSockets.delete(sessionId)
-  }, 15000) // Increased to 15 seconds
-}
 
   async _handleConnectionClose(sessionId, lastDisconnect, callbacks) {
     const reason = lastDisconnect?.error?.message || 'Unknown'
@@ -435,7 +438,8 @@ if (sock.authState?.state) {
     return session?.isConnected && 
            session?.source === 'web' && 
            !session?.detected &&
-           session?.connectionStatus === 'connected'
+           session?.connectionStatus === 'connected' &&
+           !!session?.authState
   }
 }
 
