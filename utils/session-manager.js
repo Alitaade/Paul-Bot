@@ -1,32 +1,43 @@
-// RENDER: Complete WhatsApp Session Manager - Web Pairing Only
-import { makeWASocket, useMultiFileAuthState } from "@whiskeysockets/baileys"
+// Render WhatsApp Session Manager - Connection-Only with Auto-Cleanup
+import { makeWASocket, DisconnectReason, useMultiFileAuthState } from "@whiskeysockets/baileys"
+import { Boom } from "@hapi/boom"
 import { baileysConfig } from "./baileys.js"
 import { SessionStorage } from "./session-storage.js"
 import { useMongoDBAuthState } from "./mongodb-auth-state.js"
-import { logger } from "./logger.js"
+import { createComponentLogger } from '../../utils/logger.js'
 import path from 'path'
 import fs from 'fs'
 
-class WhatsAppSessionManager {
-  constructor(telegramBot = null, sessionDir = './sessions') {
-    // Core components only - RENDER SPECIFIC
+const logger = createComponentLogger('RENDER_SESSION_MANAGER')
+
+// Simple baileys config without external dependencies
+
+
+class RenderWhatsAppSessionManager {
+  constructor(sessionDir = './sessions') {
+    // Core components
     this.storage = new SessionStorage()
     this.activeSockets = new Map()
-    this.telegramBot = telegramBot
     this.sessionDir = sessionDir
     this.mongoClient = null
     
-    // Minimal tracking for connection process only
+    // Essential tracking
     this.initializingSessions = new Set()
-    this.pairingCodes = new Map() // Store pairing codes for web interface
+    this.voluntarilyDisconnected = new Set()
     
-    // RENDER CONFIG - Connection only, no message processing
-    this.maxSessions = 10 // Lower limit for render
+    // Auto-cleanup tracking
+    this.cleanupTimers = new Map()
+    
+    // Configuration
+    this.maxSessions = 10 // Lower limit for Render
     this.isInitialized = false
-    this.eventHandlersEnabled = false // ALWAYS FALSE for render
+    
+    // No event handlers for Render - connection only
+    this.eventHandlersEnabled = false
     
     this._createSessionDirectory()
-}
+    this._setupPeriodicCleanup()
+  }
 
   _createSessionDirectory() {
     if (!fs.existsSync(this.sessionDir)) {
@@ -34,9 +45,31 @@ class WhatsAppSessionManager {
     }
   }
 
-  async waitForMongoDB(maxWaitTime = 5000) {
+  _setupPeriodicCleanup() {
+    // Clean up stale data every 5 minutes
+    setInterval(() => {
+      this._performPeriodicCleanup()
+    }, 300000)
+  }
+
+  async _performPeriodicCleanup() {
+    try {
+      const now = Date.now()
+      const staleThreshold = 900000 // 15 minutes
+      
+      for (const [sessionId, sock] of this.activeSockets) {
+        if (!sock.user && (now - (sock.createdAt || 0)) > staleThreshold) {
+          logger.info(`RENDER: Cleaning up stale session ${sessionId}`)
+          await this.disconnectSession(sessionId, true)
+        }
+      }
+    } catch (error) {
+      logger.error('RENDER: Periodic cleanup error:', error)
+    }
+  }
+
+  async waitForMongoDB(maxWaitTime = 10000) {
     const startTime = Date.now()
-    
     while (Date.now() - startTime < maxWaitTime) {
       if (this.storage.isMongoConnected && this.storage.client) {
         this.mongoClient = this.storage.client
@@ -47,37 +80,18 @@ class WhatsAppSessionManager {
     return false
   }
 
-  // RENDER SPECIFIC: Initialize existing web sessions only (for status checks)
-  async initializeExistingSessions() {
-    try {
-      await this.waitForMongoDB()
-      
-      // Only get web sessions that are already connected
-      const webSessions = await this.storage.getAllSessions()
-      const connectedSessions = webSessions.filter(s => s.isConnected && s.source === 'web')
-      
-      logger.info(`RENDER: Found ${connectedSessions.length} existing web sessions`)
-      
-      this.isInitialized = true
-      return { initialized: 0, total: connectedSessions.length }
-    } catch (error) {
-      logger.error('RENDER session initialization failed:', error)
-      return { initialized: 0, total: 0 }
-    }
-  }
-
-  // RENDER SPECIFIC: Create session for pairing only - NO EVENT HANDLERS
-  async createSession(userId, phoneNumber = null, callbacks = {}, isReconnect = false) {
+  async createSession(userId, phoneNumber = null, callbacks = {}, isReconnect = false, source = 'web') {
     const userIdStr = String(userId)
     const sessionId = userIdStr.startsWith('session_') ? userIdStr : `session_${userIdStr}`
     
-    logger.info(`RENDER: Creating session ${sessionId} for phone ${phoneNumber} (reconnect: ${isReconnect})`)
-    
+    // Prevent duplicate initialization
     if (this.initializingSessions.has(sessionId)) {
+      logger.debug(`RENDER: Session ${sessionId} already initializing`)
       return this.activeSockets.get(sessionId)
     }
     
     if (this.activeSockets.has(sessionId) && !isReconnect) {
+      logger.debug(`RENDER: Session ${sessionId} already exists`)
       return this.activeSockets.get(sessionId)
     }
 
@@ -88,6 +102,7 @@ class WhatsAppSessionManager {
     this.initializingSessions.add(sessionId)
     
     try {
+      // Clean up existing session if this is a reconnect
       if (isReconnect) {
         await this._cleanupExistingSession(sessionId)
       }
@@ -97,38 +112,27 @@ class WhatsAppSessionManager {
       
       const sock = makeWASocket({
         auth: state,
-        ...baileysConfig,
-        printQRInTerminal: false,
-        qrTimeout: 60000,
-        shouldSyncHistoryMessage: () => false,
-        shouldIgnoreJid: () => false,
-        markOnlineOnConnect: false,
-        syncFullHistory: false,
-        defaultQueryTimeoutMs: 30_000
+        ...baileysConfig
       })
 
-      // RENDER SPECIFIC: Minimal socket configuration
+      // Add creation timestamp for cleanup
+      sock.createdAt = Date.now()
+      
       this._configureSocket(sock, sessionId, authMethod, isRegistered, saveCreds)
       this.activeSockets.set(sessionId, sock)
-      
-      // RENDER: Setup connection handler - PAIRING FOCUSED
       this._setupConnectionHandler(sock, sessionId, callbacks)
 
-      // RENDER: Save session with web source - MUST HAPPEN FIRST
       await this.storage.saveSession(sessionId, {
         userId: userIdStr,
         telegramId: userIdStr,
         phoneNumber,
         isConnected: false,
         connectionStatus: 'connecting',
-        reconnectAttempts: 0,
-        source: 'web',
-        detected: false
+        source: source
       })
 
-      // RENDER: Handle pairing for new unregistered sessions - NO TIMEOUT
-      if (phoneNumber && !isRegistered && !isReconnect) {
-        this._handlePairing(sock, sessionId, phoneNumber, callbacks)
+      if (phoneNumber && !isRegistered && !isReconnect && source === 'web') {
+        setTimeout(() => this._handlePairing(sock, sessionId, phoneNumber, callbacks), 2000)
       }
 
       return sock
@@ -140,57 +144,23 @@ class WhatsAppSessionManager {
     }
   }
 
-_configureSocket(sock, sessionId, authMethod, isRegistered, saveCreds) {
-  if (sock.ev && typeof sock.ev.setMaxListeners === 'function') {
-    sock.ev.setMaxListeners(1000)
-  }
-  
-  // Enhanced saveCreds to ensure auth state is always saved
-  const enhancedSaveCreds = async (creds) => {
-    try {
-      await saveCreds(creds)
-      
-      // Also save directly to ensure it's persisted for pterodactyl
-      if (this.mongoClient && creds && Object.keys(creds).length > 0) {
-        const db = this.mongoClient.db()
-        const collection = db.collection('auth_baileys')
-        
-        const credsDoc = {
-          filename: 'creds.json',
-          sessionId: sessionId,
-          datajson: JSON.stringify(creds, (k, value) => {
-            if (Buffer.isBuffer(value) || value instanceof Uint8Array) {
-              return { type: 'Buffer', data: Buffer.from(value).toString('base64') }
-            }
-            return value
-          }),
-          updatedAt: new Date()
-        }
-        
-        await collection.updateOne(
-          { filename: 'creds.json', sessionId },
-          { $set: credsDoc },
-          { upsert: true }
-        )
-        
-        logger.info(`RENDER: Auth state saved to MongoDB for ${sessionId}`)
-      }
-    } catch (error) {
-      logger.error(`RENDER: Error saving auth state for ${sessionId}:`, error)
+  _configureSocket(sock, sessionId, authMethod, isRegistered, saveCreds) {
+    if (sock.ev && typeof sock.ev.setMaxListeners === 'function') {
+      sock.ev.setMaxListeners(100) // Lower limit for Render
     }
+    
+    sock.ev.on('creds.update', saveCreds)
+    sock.authMethod = authMethod
+    sock.isRegistered = isRegistered
+    sock.sessionId = sessionId
+    
+    // No event handlers for Render
+    sock.eventHandlersSetup = false
   }
-  
-  sock.ev.on('creds.update', enhancedSaveCreds)
-  sock.authMethod = authMethod
-  sock.isRegistered = isRegistered
-  sock.sessionId = sessionId
-  sock.eventHandlersSetup = false
-}
 
   async _getAuthState(sessionId) {
     let state, saveCreds, authMethod = 'file'
     
-    // Try MongoDB auth first
     if (this.mongoClient) {
       try {
         const db = this.mongoClient.db()
@@ -205,7 +175,6 @@ _configureSocket(sock, sessionId, authMethod, isRegistered, saveCreds) {
       }
     }
     
-    // Fallback to file auth
     if (!state) {
       const authPath = path.join(this.sessionDir, sessionId)
       if (!fs.existsSync(authPath)) {
@@ -221,79 +190,6 @@ _configureSocket(sock, sessionId, authMethod, isRegistered, saveCreds) {
     return { state, saveCreds, authMethod }
   }
 
-async _ensureAuthStateSaved(sessionId, sock) {
-  try {
-    if (!this.mongoClient) {
-      logger.warn(`RENDER: No MongoDB client for ${sessionId}`)
-      return false
-    }
-    
-    // Get the actual auth state from the socket
-    const authState = sock?.authState || sock?.user
-    if (!authState) {
-      logger.warn(`RENDER: No auth state found for ${sessionId}`)
-      return false
-    }
-    
-    const db = this.mongoClient.db()
-    const collection = db.collection('auth_baileys')
-    
-    // Save the credentials
-    const credsDoc = {
-      filename: 'creds.json',
-      sessionId: sessionId,
-      datajson: JSON.stringify(authState.creds || authState, (k, value) => {
-        if (Buffer.isBuffer(value) || value instanceof Uint8Array) {
-          return { type: 'Buffer', data: Buffer.from(value).toString('base64') }
-        }
-        return value
-      }),
-      updatedAt: new Date()
-    }
-    
-    await collection.updateOne(
-      { filename: 'creds.json', sessionId },
-      { $set: credsDoc },
-      { upsert: true }
-    )
-    
-    logger.info(`RENDER: Auth state saved to MongoDB for ${sessionId}`)
-    return true
-  } catch (error) {
-    logger.error(`RENDER: Error ensuring auth state for ${sessionId}:`, error)
-    return false
-  }
-}
-
-  async disconnectSession(sessionId, forceCleanup = false) {
-    if (forceCleanup) {
-      return await this.performCompleteUserCleanup(sessionId)
-    }
-
-    this.initializingSessions.delete(sessionId)
-
-    const sock = this.activeSockets.get(sessionId)
-    
-    if (sock) {
-      try {
-        this._cleanupSocket(sessionId, sock)
-      } catch (error) {
-        logger.warn(`RENDER: Error during socket cleanup for ${sessionId}: ${error.message}`)
-      }
-    }
-
-    this.activeSockets.delete(sessionId)
-    await this.storage.deleteSession(sessionId)
-    this.pairingCodes.delete(sessionId)
-  }
-
-  // RENDER: NO EVENT HANDLERS - This method does nothing
-  async enableEventHandlers() {
-    logger.info('RENDER: Event handlers are disabled - connection only mode')
-    return false
-  }
-
-  // RENDER SPECIFIC: Connection handler for pairing process
   _setupConnectionHandler(sock, sessionId, callbacks) {
     const connectionHandler = async (update) => {
       await this._handleConnectionUpdate(sessionId, update, callbacks)
@@ -304,7 +200,6 @@ async _ensureAuthStateSaved(sessionId, sock) {
 
   async _handleConnectionUpdate(sessionId, update, callbacks) {
     const { connection, lastDisconnect, qr } = update
-    const userId = sessionId.replace('session_', '').replace('web_', '')
     const sock = this.activeSockets.get(sessionId)
 
     try {
@@ -313,7 +208,7 @@ async _ensureAuthStateSaved(sessionId, sock) {
       }
 
       if (connection === 'open') {
-        await this._handleConnectionOpen(sock, sessionId, userId, callbacks)
+        await this._handleConnectionOpen(sock, sessionId, callbacks)
       } else if (connection === 'close') {
         await this._handleConnectionClose(sessionId, lastDisconnect, callbacks)
       } else if (connection === 'connecting') {
@@ -324,171 +219,118 @@ async _ensureAuthStateSaved(sessionId, sock) {
     }
   }
 
-async _handleConnectionOpen(sock, sessionId, userId, callbacks) {
-  if (!sock) return
-  
-  const phoneNumber = sock?.user?.id?.split('@')[0]
-  
-  // CRITICAL: Sequential updates to prevent race conditions
-  const updateData = {
-    isConnected: true,
-    phoneNumber: phoneNumber ? `+${phoneNumber}` : null,
-    connectionStatus: 'connected',
-    reconnectAttempts: 0,
-    source: 'web',
-    detected: false
-  }
-
-  // Update databases sequentially to avoid race conditions
-  const mongoSuccess = await this.storage._updateInMongo(sessionId, updateData)
-  const pgSuccess = await this.storage._updateInPostgres(sessionId, updateData)
-  
-  logger.info(`RENDER: Database updates - Mongo: ${mongoSuccess}, PostgreSQL: ${pgSuccess}`)
-
-  // Ensure auth state is saved for pterodactyl detection
-  await this._ensureAuthStateSaved(sessionId, sock)
-
-  logger.info(`RENDER: ✓ ${sessionId} connected (+${phoneNumber || 'unknown'}) - Ready for pterodactyl detection`)
-
-  this.pairingCodes.delete(sessionId)
-  
-  if (callbacks?.onConnected) {
-    callbacks.onConnected(sock)
-  }
-
-  // Keep socket alive for 15 seconds then cleanup
-  setTimeout(() => {
-    logger.info(`RENDER: Auto-cleanup socket ${sessionId} - pterodactyl will handle messages`)
-    this._cleanupSocket(sessionId, sock)
-    this.activeSockets.delete(sessionId)
-  }, 15000)
-}
-
-async _handleConnectionClose(sessionId, lastDisconnect, callbacks) {
-  const reason = lastDisconnect?.error?.message || 'Unknown'
-  logger.info(`RENDER: ✗ ${sessionId} disconnected: ${reason}`)
-  
-  await this.storage.updateSession(sessionId, { 
-    isConnected: false,
-    connectionStatus: 'disconnected'
-  })
-  
-  // RENDER: Check if should reconnect (like Pterodactyl does)
-  const shouldReconnect = this._shouldReconnect(lastDisconnect, sessionId)
-  if (shouldReconnect) {
-    logger.info(`RENDER: Will reconnect ${sessionId} - ${reason}`)
-    setTimeout(() => this._reconnectSession(sessionId, callbacks), 3000)
-  } else {
-    logger.info(`RENDER: Will not reconnect ${sessionId} - ${reason}`)
-    await this.disconnectSession(sessionId, true)
+  async _handleConnectionOpen(sock, sessionId, callbacks) {
+    if (!sock) return
     
-    if (callbacks?.onError) {
-      callbacks.onError(new Error(`Connection failed: ${reason}`))
-    }
-  }
-}
+    this.voluntarilyDisconnected.delete(sessionId)
+    const phoneNumber = sock?.user?.id?.split('@')[0]
+    
+    await this.storage.updateSession(sessionId, {
+      isConnected: true,
+      phoneNumber: phoneNumber ? `+${phoneNumber}` : null,
+      connectionStatus: 'connected'
+    })
 
-  _shouldReconnect(lastDisconnect, sessionId) {
-  if (!lastDisconnect?.error) return true
-  
-  const reason = lastDisconnect.error.message || ''
-  
-  // RENDER: Reconnect on stream errors (like Pterodactyl does)
-  if (reason.includes('Stream Errored') || reason.includes('restart required')) {
-    return true
+    logger.info(`RENDER: ✓ ${sessionId} connected (+${phoneNumber || 'unknown'})`)
+
+    if (callbacks?.onConnected) {
+      callbacks.onConnected(sock)
+    }
+
+    // RENDER SPECIFIC: Schedule auto-cleanup after 15 seconds
+    // This allows Pterodactyl to detect and take over the session
+    this._scheduleAutoCleanup(sessionId, 15000)
   }
-  
-  // RENDER: Don't reconnect on permanent failures
-  if (reason.includes('QR timeout') || reason.includes('logged out')) {
-    return false
-  }
-  
-  return true
-}
-  
-    async _reconnectSession(sessionId, callbacks) {
-    try {
-      const session = await this.storage.getSession(sessionId)
-      if (!session) {
-        logger.warn(`RENDER: Cannot reconnect ${sessionId} - session not found`)
-        return
+
+  _scheduleAutoCleanup(sessionId, delay) {
+    // Clear any existing cleanup timer
+    if (this.cleanupTimers.has(sessionId)) {
+      clearTimeout(this.cleanupTimers.get(sessionId))
+    }
+
+    const timer = setTimeout(async () => {
+      try {
+        logger.info(`RENDER: Auto-cleaning up session ${sessionId} - handing over to Pterodactyl`)
+        
+        // Mark as undetected so Pterodactyl can pick it up
+        await this.storage.updateSession(sessionId, { 
+          detected: false 
+        })
+        
+        // Clean up socket but keep session data
+        const sock = this.activeSockets.get(sessionId)
+        if (sock) {
+          this._cleanupSocket(sessionId, sock)
+          this.activeSockets.delete(sessionId)
+        }
+        
+        this.cleanupTimers.delete(sessionId)
+        logger.info(`RENDER: Session ${sessionId} handed over to Pterodactyl detection system`)
+        
+      } catch (error) {
+        logger.error(`RENDER: Auto-cleanup error for ${sessionId}:`, error)
       }
+    }, delay)
 
-      logger.info(`RENDER: Reconnecting ${sessionId}...`)
-      
-      await this.createSession(
-        session.userId, 
-        session.phoneNumber, 
-        callbacks, 
-        true // isReconnect = true
-      )
-      
-    } catch (error) {
-      logger.error(`RENDER: Reconnect failed for ${sessionId}:`, error)
-      
-      // Try again after delay
-      setTimeout(() => this._reconnectSession(sessionId, callbacks), 5000)
+    this.cleanupTimers.set(sessionId, timer)
+  }
+
+  async _handleConnectionClose(sessionId, lastDisconnect, callbacks) {
+    const reason = lastDisconnect?.error?.message || 'Unknown'
+    
+    logger.info(`RENDER: ✗ ${sessionId} disconnected: ${reason}`)
+    
+    await this.storage.updateSession(sessionId, { 
+      isConnected: false,
+      connectionStatus: 'disconnected'
+    })
+    
+    // Don't reconnect in Render - let Pterodactyl handle it
+    await this.disconnectSession(sessionId, true)
+  }
+
+  async disconnectSession(sessionId, forceCleanup = false) {
+    this.initializingSessions.delete(sessionId)
+    this.voluntarilyDisconnected.add(sessionId)
+
+    // Clear any scheduled cleanup
+    if (this.cleanupTimers.has(sessionId)) {
+      clearTimeout(this.cleanupTimers.get(sessionId))
+      this.cleanupTimers.delete(sessionId)
+    }
+
+    const sock = this.activeSockets.get(sessionId)
+    if (sock) {
+      try {
+        this._cleanupSocket(sessionId, sock)
+      } catch (error) {
+        logger.warn(`RENDER: Error during socket cleanup for ${sessionId}: ${error.message}`)
+      }
+    }
+
+    this.activeSockets.delete(sessionId)
+    
+    if (forceCleanup) {
+      await this.storage.deleteSession(sessionId)
     }
   }
-  
 
-  // RENDER: Simplified cleanup
   _cleanupSocket(sessionId, sock) {
     try {
-      // Remove all listeners directly
       if (sock.ev && typeof sock.ev.removeAllListeners === 'function') {
         sock.ev.removeAllListeners()
       }
       
-      // Close socket
       if (sock.ws && sock.ws.readyState === sock.ws.OPEN) {
-        sock.ws.close(1000, 'RENDER cleanup')
+        sock.ws.close(1000, 'Render Cleanup')
       }
       
-      // Clear references
       sock.user = null
       sock.eventHandlersSetup = false
-      
       return true
     } catch (error) {
       logger.error(`RENDER: Socket cleanup error for ${sessionId}:`, error)
       return false
-    }
-  }
-
-  async performCompleteUserCleanup(sessionId) {
-    const userId = sessionId.replace('session_', '').replace('web_', '')
-    const results = { socket: false, database: false }
-
-    try {
-      this.initializingSessions.delete(sessionId)
-      
-      // Cleanup socket
-      const sock = this.activeSockets.get(sessionId)
-      if (sock) {
-        results.socket = this._cleanupSocket(sessionId, sock)
-      }
-      this.activeSockets.delete(sessionId)
-      this.pairingCodes.delete(sessionId)
-
-      // Database cleanup
-      try {
-        await this.storage.updateSession(sessionId, {
-          isConnected: false,
-          connectionStatus: 'disconnected',
-          detected: false
-        })
-        results.database = true
-      } catch (error) {
-        logger.error(`RENDER: Database cleanup error for ${sessionId}:`, error)
-      }
-
-      logger.info(`RENDER: Complete cleanup for ${sessionId}:`, results)
-      return results
-
-    } catch (error) {
-      logger.error(`RENDER: Cleanup failed for ${sessionId}:`, error)
-      return results
     }
   }
 
@@ -503,20 +345,14 @@ async _handleConnectionClose(sessionId, lastDisconnect, callbacks) {
     }
   }
 
-  // RENDER SPECIFIC: Handle pairing process with code generation
   async _handlePairing(sock, sessionId, phoneNumber, callbacks) {
     try {
-      if (!this.activeSockets.has(sessionId) || sock.isRegistered) {
-        logger.warn(`RENDER: Pairing skipped for ${sessionId} - socket missing or already registered`)
-        return
-      }
-      
-      logger.info(`RENDER: Starting pairing process for ${sessionId} with ${phoneNumber}`)
+      if (!this.activeSockets.has(sessionId) || sock.isRegistered) return
       
       const { handlePairing } = await import("./pairing.js")
-      await handlePairing(sock, sessionId, phoneNumber, this.pairingCodes, callbacks)
+      await handlePairing(sock, sessionId, phoneNumber, new Map(), callbacks)
       
-      logger.info(`RENDER: ${sessionId} pairing completed, waiting for connection...`)
+      logger.info(`RENDER: ${sessionId} pairing completed`)
       
     } catch (error) {
       logger.error(`RENDER: Pairing error for ${sessionId}:`, error)
@@ -524,23 +360,9 @@ async _handleConnectionClose(sessionId, lastDisconnect, callbacks) {
     }
   }
 
-  // RENDER SPECIFIC: Get pairing code for web display
-  getPairingCode(sessionId) {
-    return this.pairingCodes.get(sessionId)
-  }
-
-  // RENDER SPECIFIC: Set pairing code from pairing process
-  setPairingCode(sessionId, code) {
-    this.pairingCodes.set(sessionId, code)
-  }
-
   // PUBLIC API METHODS
   getSession(sessionId) {
     return this.activeSockets.get(sessionId)
-  }
-
-  async getAllSessions() {
-    return await this.storage.getAllSessions()
   }
 
   async isSessionConnected(sessionId) {
@@ -549,57 +371,74 @@ async _handleConnectionClose(sessionId, lastDisconnect, callbacks) {
   }
   
   async isReallyConnected(sessionId) {
+    const sock = this.activeSockets.get(sessionId)
     const session = await this.storage.getSession(sessionId)
-    return session?.isConnected && session?.source === 'web'
+    return !!(sock && sock.user && session?.isConnected)
   }
 
   async getStats() {
     const allSessions = await this.storage.getAllSessions()
     const connectedSessions = allSessions.filter(s => s.isConnected)
+    const webSessions = allSessions.filter(s => s.source === 'web')
     
     return {
       totalSessions: allSessions.length,
       connectedSessions: connectedSessions.length,
+      webSessions: webSessions.length,
       activeSockets: this.activeSockets.size,
-      eventHandlersEnabled: false, // Always false for render
       maxSessions: this.maxSessions,
       isInitialized: this.isInitialized,
       storage: this.storage.isConnected ? 'Connected' : 'Disconnected',
-      mode: 'RENDER_CONNECTION_ONLY'
+      mode: 'RENDER_CONNECTION_ONLY',
+      scheduledCleanups: this.cleanupTimers.size
     }
   }
 
-  // RENDER SPECIFIC: Check if session is ready for pterodactyl detection
-  async isReadyForDetection(sessionId) {
-    const session = await this.storage.getSession(sessionId)
-    return session?.isConnected && 
-           session?.source === 'web' && 
-           !session?.detected &&
-           session?.connectionStatus === 'connected'
+  isVoluntarilyDisconnected(sessionId) {
+    return this.voluntarilyDisconnected.has(sessionId)
   }
 
+  clearVoluntaryDisconnection(sessionId) {
+    this.voluntarilyDisconnected.delete(sessionId)
+  }
+
+  // Cleanup all sessions and timers
+  async shutdown() {
+    logger.info('RENDER: Shutting down session manager')
+    
+    // Clear all cleanup timers
+    for (const timer of this.cleanupTimers.values()) {
+      clearTimeout(timer)
+    }
+    this.cleanupTimers.clear()
+
+    // Disconnect all sessions
+    for (const sessionId of this.activeSockets.keys()) {
+      await this.disconnectSession(sessionId, false)
+    }
+
+    logger.info('RENDER: Session manager shutdown complete')
+  }
 }
-export { WhatsAppSessionManager }
+
+export { RenderWhatsAppSessionManager }
 
 // SINGLETON MANAGEMENT
 let instance = null
 
-export function initializeSessionManager(telegramBot, sessionDir = './sessions') {
+export function initializeSessionManager(sessionDir = './sessions') {
   if (!instance) {
-    instance = new WhatsAppSessionManager(telegramBot, sessionDir)
+    instance = new RenderWhatsAppSessionManager(sessionDir)
   }
   return instance
 }
 
 export function getSessionManager() {
   if (!instance) {
-    instance = new WhatsAppSessionManager(null, './sessions')
+    instance = new RenderWhatsAppSessionManager('./sessions')
   }
   return instance
 }
 
 export const sessionManager = getSessionManager()
 export default getSessionManager
-
-
-

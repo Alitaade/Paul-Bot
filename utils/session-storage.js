@@ -1,8 +1,9 @@
-//render session storage
+// Render Session Storage - Web-focused, lightweight storage
 import { MongoClient } from 'mongodb'
-import crypto from 'crypto'
-import { logger } from './logger.js'
 import bcrypt from 'bcryptjs'
+import { createComponentLogger } from './utils/logger.js'
+
+const logger = createComponentLogger('RENDER_STORAGE')
 
 export class SessionStorage {
   constructor() {
@@ -12,12 +13,25 @@ export class SessionStorage {
     this.isMongoConnected = false
     this.postgresPool = null
     this.isPostgresConnected = false
-    this.encryptionKey = this._getEncryptionKey()
-    this.userAuthInitialized = false
+    this.sessionCache = new Map()
+    this.writeBuffer = new Map()
     this.retryCount = 0
-    this.maxRetries = 1
+    this.maxRetries = 2
     
     this._initConnections()
+    this._setupCacheCleanup()
+  }
+
+  _setupCacheCleanup() {
+    // Clean cache every 2 minutes to prevent memory buildup
+    setInterval(() => {
+      const now = Date.now()
+      for (const [key, data] of this.sessionCache) {
+        if (data.timestamp && (now - data.timestamp) > 120000) {
+          this.sessionCache.delete(key)
+        }
+      }
+    }, 120000)
   }
 
   async _initConnections() {
@@ -33,14 +47,14 @@ export class SessionStorage {
         'mongodb+srv://Paul112210:qahmr6jy2b4uzBMf@main.uwa6va6.mongodb.net/?retryWrites=true&w=majority&appName=Main'
       
       const connectionOptions = {
-        maxPoolSize: 3,
+        maxPoolSize: 3, // Lower pool size for Render
         minPoolSize: 1,
-        maxIdleTimeMS: 15000,
-        serverSelectionTimeoutMS: 5000,
-        socketTimeoutMS: 15000,
-        connectTimeoutMS: 5000,
-        retryWrites: false,
-        heartbeatFrequencyMS: 60000
+        maxIdleTimeMS: 30000,
+        serverSelectionTimeoutMS: 8000,
+        socketTimeoutMS: 30000,
+        connectTimeoutMS: 10000,
+        retryWrites: true,
+        heartbeatFrequencyMS: 30000
       }
       
       this.client = new MongoClient(mongoUrl, connectionOptions)
@@ -48,7 +62,7 @@ export class SessionStorage {
       await Promise.race([
         this.client.connect(),
         new Promise((_, reject) => 
-          setTimeout(() => reject(new Error('Connection timeout')), 5000)
+          setTimeout(() => reject(new Error('Connection timeout')), 10000)
         )
       ])
       
@@ -57,17 +71,26 @@ export class SessionStorage {
       this.db = this.client.db()
       this.sessions = this.db.collection('sessions')
       
+      await this.sessions.createIndex({ sessionId: 1 }, { unique: true, background: true })
+        .catch(() => {})
+      
       this.isMongoConnected = true
       this.retryCount = 0
+      logger.info('RENDER: MongoDB connected successfully')
       
     } catch (error) {
       this.isMongoConnected = false
+      logger.warn('RENDER: MongoDB connection failed:', error.message)
+      if (this.retryCount < this.maxRetries) {
+        this.retryCount++
+        setTimeout(() => this._initMongoDB(), 5000)
+      }
     }
   }
 
   async _initPostgres() {
     try {
-      const { pool } = await import('./database.js')
+      const { pool } = await import('../../config/database.js')
       this.postgresPool = pool
       
       const client = await this.postgresPool.connect()
@@ -75,48 +98,146 @@ export class SessionStorage {
       client.release()
       
       this.isPostgresConnected = true
+      logger.info('RENDER: PostgreSQL connected successfully')
     } catch (error) {
       this.isPostgresConnected = false
+      logger.warn('RENDER: PostgreSQL connection failed:', error.message)
     }
   }
 
-  _getEncryptionKey() {
-    const key = process.env.SESSION_ENCRYPTION_KEY || 'default-key-change-in-production'
-    return crypto.createHash('sha256').update(key).digest()
-  }
-
-  // RENDER-SPECIFIC: Save session with 'web' source
-async saveSession(sessionId, sessionData, credentials = null) {
-  try {
-    // Force source to 'web' for render sessions
-    const webSessionData = {
-      ...sessionData,
-      source: 'web',
-      detected: false // Mark as undetected for pterodactyl polling
+  async saveSession(sessionId, sessionData) {
+    try {
+      const success = await this._saveToMongo(sessionId, sessionData) ||
+                     await this._saveToPostgres(sessionId, sessionData)
+      
+      if (success) {
+        this.sessionCache.set(sessionId, { 
+          ...sessionData, 
+          timestamp: Date.now() 
+        })
+        return true
+      }
+      
+      return false
+    } catch (error) {
+      logger.error('RENDER: Save session error:', error)
+      return false
     }
-    
-    const mongoSuccess = await this._saveToMongo(sessionId, webSessionData, credentials)
-    const pgSuccess = await this._saveToPostgres(sessionId, webSessionData, credentials)
-    
-    return mongoSuccess || pgSuccess
-  } catch (error) {
-    return false
   }
-}
 
   async getSession(sessionId) {
     try {
-      return await this._getFromMongo(sessionId) || await this._getFromPostgres(sessionId)
+      // Check cache first
+      if (this.sessionCache.has(sessionId)) {
+        const cached = this.sessionCache.get(sessionId)
+        if (cached.timestamp && (Date.now() - cached.timestamp) < 60000) {
+          return cached
+        }
+        this.sessionCache.delete(sessionId)
+      }
+
+      const session = await this._getFromMongo(sessionId) || await this._getFromPostgres(sessionId)
+      
+      if (session) {
+        this.sessionCache.set(sessionId, { 
+          ...session, 
+          timestamp: Date.now() 
+        })
+        return session
+      } else {
+        this.sessionCache.delete(sessionId)
+        return null
+      }
     } catch (error) {
+      logger.error('RENDER: Get session error:', error)
+      this.sessionCache.delete(sessionId)
       return null
     }
   }
 
-  // Web user management methods
-  async createUser(userData) {
+  async updateSession(sessionId, updates) {
+    try {
+      const bufferId = `${sessionId}_update`
+      
+      if (this.writeBuffer.has(bufferId)) {
+        clearTimeout(this.writeBuffer.get(bufferId).timeout)
+        Object.assign(this.writeBuffer.get(bufferId).data, updates)
+      } else {
+        this.writeBuffer.set(bufferId, { data: updates, timeout: null })
+      }
+      
+      const timeoutId = setTimeout(async () => {
+        const bufferedData = this.writeBuffer.get(bufferId)?.data
+        if (bufferedData) {
+          await this._updateInMongo(sessionId, bufferedData)
+          await this._updateInPostgres(sessionId, bufferedData)
+          
+          if (this.sessionCache.has(sessionId)) {
+            Object.assign(this.sessionCache.get(sessionId), bufferedData)
+            this.sessionCache.get(sessionId).timestamp = Date.now()
+          }
+          
+          this.writeBuffer.delete(bufferId)
+        }
+      }, 200) // Faster writes for Render
+      
+      this.writeBuffer.get(bufferId).timeout = timeoutId
+      return true
+    } catch (error) {
+      logger.error('RENDER: Update session error:', error)
+      return false
+    }
+  }
+
+  async deleteSession(sessionId) {
+    try {
+      this.sessionCache.delete(sessionId)
+      this.writeBuffer.delete(`${sessionId}_update`)
+      
+      const bufferId = `${sessionId}_update`
+      if (this.writeBuffer.has(bufferId)) {
+        const bufferData = this.writeBuffer.get(bufferId)
+        if (bufferData.timeout) {
+          clearTimeout(bufferData.timeout)
+        }
+        this.writeBuffer.delete(bufferId)
+      }
+      
+      const results = await Promise.allSettled([
+        this._deleteFromMongo(sessionId),
+        this._deleteFromPostgres(sessionId)
+      ])
+      
+      return results.some(r => r.status === 'fulfilled' && r.value)
+    } catch (error) {
+      logger.error('RENDER: Delete session error:', error)
+      return false
+    }
+  }
+
+  async getAllSessions() {
     try {
       if (this.isPostgresConnected) {
-        return await this._createUserPostgres(userData)
+        return await this._getAllFromPostgres()
+      } else if (this.isMongoConnected) {
+        return await this._getAllFromMongo()
+      }
+      return []
+    } catch (error) {
+      logger.error('RENDER: Get all sessions error:', error)
+      return []
+    }
+  }
+
+  // Web user authentication methods
+  async createUser(userData) {
+    const { name, phoneNumber, password } = userData
+    
+    try {
+      if (this.isPostgresConnected) {
+        return await this._createUserPostgres(name, phoneNumber, password)
+      } else if (this.isMongoConnected) {
+        return await this._createUserMongo(name, phoneNumber, password)
       }
       throw new Error('No database connection available')
     } catch (error) {
@@ -129,6 +250,8 @@ async saveSession(sessionId, sessionData, credentials = null) {
     try {
       if (this.isPostgresConnected) {
         return await this._getUserByPhonePostgres(phoneNumber)
+      } else if (this.isMongoConnected) {
+        return await this._getUserByPhoneMongo(phoneNumber)
       }
       return null
     } catch (error) {
@@ -141,6 +264,8 @@ async saveSession(sessionId, sessionData, credentials = null) {
     try {
       if (this.isPostgresConnected) {
         return await this._getUserByIdPostgres(userId)
+      } else if (this.isMongoConnected) {
+        return await this._getUserByIdMongo(userId)
       }
       return null
     } catch (error) {
@@ -149,154 +274,33 @@ async saveSession(sessionId, sessionData, credentials = null) {
     }
   }
 
-  async _createUserPostgres(userData) {
-    const hashedPassword = await bcrypt.hash(userData.password, 12)
+  // MongoDB operations
+  async _saveToMongo(sessionId, sessionData) {
+    if (!this.isMongoConnected) return false
     
-    // Generate a unique positive telegram_id for web users (9 billion range)
-    const webTelegramId = Math.floor(Math.random() * 1000000000) + 9000000000
-    
-    // Initialize web_users_auth table if not exists
-    await this._initWebUsersAuth()
-    
-    const result = await this.postgresPool.query(`
-      INSERT INTO users (telegram_id, first_name, phone_number, username, is_active, source, created_at)
-      VALUES ($1, $2, $3, $4, true, 'web', NOW())
-      RETURNING id, telegram_id, first_name, phone_number, username, created_at
-    `, [webTelegramId, userData.name, userData.phoneNumber, `web_${userData.name.toLowerCase().replace(/\s+/g, '_')}`])
-    
-    await this.postgresPool.query(`
-      INSERT INTO web_users_auth (user_id, password_hash) VALUES ($1, $2)
-      ON CONFLICT (user_id) DO UPDATE SET password_hash = $2, updated_at = NOW()
-    `, [result.rows[0].id, hashedPassword])
-    
-    return result.rows[0]
-  }
-
-  async _getUserByPhonePostgres(phoneNumber) {
-    const result = await this.postgresPool.query(`
-      SELECT u.id, u.telegram_id, u.first_name as name, u.phone_number, 
-             u.username, u.created_at, u.updated_at, w.password_hash
-      FROM users u
-      LEFT JOIN web_users_auth w ON u.id = w.user_id
-      WHERE u.phone_number = $1 AND u.telegram_id >= 9000000000
-    `, [phoneNumber])
-    
-    return result.rows[0] || null
-  }
-
-  async _getUserByIdPostgres(userId) {
-    const result = await this.postgresPool.query(`
-      SELECT u.id, u.telegram_id, u.first_name as name, u.phone_number, 
-             u.username, u.created_at, u.updated_at
-      FROM users u
-      WHERE u.id = $1 AND u.telegram_id >= 9000000000
-    `, [userId])
-    
-    return result.rows[0] || null
-  }
-
-  async _initWebUsersAuth() {
-    if (this.userAuthInitialized) return
-    
-    await this.postgresPool.query(`
-      CREATE TABLE IF NOT EXISTS web_users_auth (
-        user_id BIGINT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
-        password_hash VARCHAR(255) NOT NULL,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-      )
-    `)
-    
-    this.userAuthInitialized = true
-  }
-
-async updateSession(sessionId, updates) {
-  try {
-    // Force immediate write for connection status changes
-    if (updates.isConnected !== undefined || updates.connectionStatus) {
-      logger.info(`RENDER: Immediate update for ${sessionId}:`, updates)
-      
-      const results = await Promise.all([
-        this._updateInMongo(sessionId, updates),
-        this._updateInPostgres(sessionId, updates)
-      ])
-      
-      return results.some(r => r === true)
-    }
-    
-    // For other updates, also do immediate write since we don't have writeBuffer
-    const results = await Promise.all([
-      this._updateInMongo(sessionId, updates),
-      this._updateInPostgres(sessionId, updates)
-    ])
-    
-    return results.some(r => r === true)
-  } catch (error) {
-    logger.error('RENDER: Update session error:', error)
-    return false
-  }
-}
-
-  async deleteSession(sessionId) {
     try {
-      const results = await Promise.allSettled([
-        this._deleteFromMongo(sessionId),
-        this._deleteFromPostgres(sessionId)
-      ])
-      
-      return results.some(r => r.status === 'fulfilled' && r.value)
+      const document = {
+        sessionId,
+        telegramId: sessionData.telegramId || sessionData.userId,
+        phoneNumber: sessionData.phoneNumber,
+        isConnected: sessionData.isConnected || false,
+        connectionStatus: sessionData.connectionStatus || 'disconnected',
+        source: sessionData.source || 'web',
+        detected: sessionData.detected !== undefined ? sessionData.detected : false,
+        createdAt: new Date(),
+        updatedAt: new Date()
+      }
+
+      await this.sessions.replaceOne({ sessionId }, document, { upsert: true })
+      return true
     } catch (error) {
+      if (error.name === 'MongoNetworkError' || error.name === 'MongoServerSelectionError') {
+        this.isMongoConnected = false
+      }
+      logger.error('RENDER: MongoDB save error:', error)
       return false
     }
   }
-
-  // RENDER-SPECIFIC: Get only web sessions for this render instance
-  async getAllSessions() {
-    try {
-      if (this.isMongoConnected) {
-        return await this._getAllWebFromMongo()
-      } else if (this.isPostgresConnected) {
-        return await this._getAllWebFromPostgres()
-      }
-      return []
-    } catch (error) {
-      return []
-    }
-  }
-
-  // MongoDB operations with web source
-async _saveToMongo(sessionId, sessionData, credentials) {
-  if (!this.isMongoConnected) return false
-  
-  try {
-    // Clean up any existing sessions for this telegram_id with different sessionId
-    const telegramId = sessionData.telegramId || sessionData.userId
-    await this.sessions.deleteMany({ 
-      telegramId: telegramId, 
-      sessionId: { $ne: sessionId }
-    })
-    
-    const document = {
-      sessionId,
-      telegramId: telegramId,
-      phoneNumber: sessionData.phoneNumber,
-      isConnected: sessionData.isConnected || false,
-      connectionStatus: sessionData.connectionStatus || 'disconnected',
-      reconnectAttempts: sessionData.reconnectAttempts || 0,
-      source: sessionData.source || 'web',
-      detected: sessionData.detected || false,
-      updatedAt: new Date()
-    }
-
-    await this.sessions.replaceOne({ sessionId }, document, { upsert: true })
-    logger.info(`RENDER: MongoDB session saved: ${sessionId}`)
-    return true
-  } catch (error) {
-    logger.error('RENDER: MongoDB save error:', error)
-    this.isMongoConnected = false
-    return false
-  }
-}
 
   async _getFromMongo(sessionId) {
     if (!this.isMongoConnected) return null
@@ -312,38 +316,40 @@ async _saveToMongo(sessionId, sessionData, credentials) {
         phoneNumber: session.phoneNumber,
         isConnected: session.isConnected,
         connectionStatus: session.connectionStatus,
-        reconnectAttempts: session.reconnectAttempts,
-        source: session.source,
-        detected: session.detected,
-        credentials: session.credentials ? this._decrypt(session.credentials) : null,
-        authState: session.authState ? this._decrypt(session.authState) : null,
+        source: session.source || 'web',
+        detected: session.detected !== undefined ? session.detected : false,
+        createdAt: session.createdAt,
         updatedAt: session.updatedAt
       }
     } catch (error) {
-      this.isMongoConnected = false
+      if (error.name === 'MongoNetworkError' || error.name === 'MongoServerSelectionError') {
+        this.isMongoConnected = false
+      }
+      logger.error('RENDER: MongoDB get error:', error)
       return null
     }
   }
 
-async _updateInMongo(sessionId, updates) {
-  if (!this.isMongoConnected) return false
-  
-  try {
-    const updateDoc = { ...updates, updatedAt: new Date() }
-
-    const result = await this.sessions.updateOne(
-      { sessionId }, 
-      { $set: updateDoc }
-    )
+  async _updateInMongo(sessionId, updates) {
+    if (!this.isMongoConnected) return false
     
-    logger.info(`RENDER: MongoDB updated ${result.modifiedCount} docs for ${sessionId}`)
-    return result.modifiedCount > 0 || result.matchedCount > 0
-  } catch (error) {
-    logger.error('RENDER: MongoDB update error:', error)
-    this.isMongoConnected = false
-    return false
+    try {
+      const updateDoc = { ...updates, updatedAt: new Date() }
+
+      const result = await this.sessions.updateOne(
+        { sessionId }, 
+        { $set: updateDoc }
+      )
+      
+      return result.modifiedCount > 0 || result.matchedCount > 0
+    } catch (error) {
+      if (error.name === 'MongoNetworkError' || error.name === 'MongoServerSelectionError') {
+        this.isMongoConnected = false
+      }
+      logger.error('RENDER: MongoDB update error:', error)
+      return false
+    }
   }
-}
 
   async _deleteFromMongo(sessionId) {
     if (!this.isMongoConnected) return false
@@ -352,16 +358,19 @@ async _updateInMongo(sessionId, updates) {
       const result = await this.sessions.deleteOne({ sessionId })
       return result.deletedCount > 0
     } catch (error) {
-      this.isMongoConnected = false
+      if (error.name === 'MongoNetworkError' || error.name === 'MongoServerSelectionError') {
+        this.isMongoConnected = false
+      }
+      logger.error('RENDER: MongoDB delete error:', error)
       return false
     }
   }
 
-  async _getAllWebFromMongo() {
+  async _getAllFromMongo() {
     if (!this.isMongoConnected) return []
     
     try {
-      const sessions = await this.sessions.find({ source: 'web' }).sort({ updatedAt: -1 }).toArray()
+      const sessions = await this.sessions.find({}).sort({ updatedAt: -1 }).toArray()
 
       return sessions.map(session => ({
         sessionId: session.sessionId,
@@ -370,73 +379,121 @@ async _updateInMongo(sessionId, updates) {
         phoneNumber: session.phoneNumber,
         isConnected: session.isConnected,
         connectionStatus: session.connectionStatus,
-        reconnectAttempts: session.reconnectAttempts,
-        source: session.source,
-        detected: session.detected,
-        hasCredentials: !!session.credentials,
-        hasAuthState: !!session.authState,
+        source: session.source || 'web',
+        detected: session.detected !== undefined ? session.detected : false,
+        createdAt: session.createdAt,
         updatedAt: session.updatedAt
       }))
     } catch (error) {
-      this.isMongoConnected = false
+      if (error.name === 'MongoNetworkError' || error.name === 'MongoServerSelectionError') {
+        this.isMongoConnected = false
+      }
+      logger.error('RENDER: MongoDB get all error:', error)
       return []
     }
   }
 
-  // PostgreSQL operations using USERS table
-async _saveToPostgres(sessionId, sessionData, credentials) {
-  if (!this.isPostgresConnected) return false
-  
-  try {
-    // First check if user already has a different session_id
-    const existingUser = await this.postgresPool.query(`
-      SELECT session_id FROM users WHERE telegram_id = $1 AND session_id IS NOT NULL AND session_id != $2
-    `, [sessionData.telegramId || sessionData.userId, sessionId])
+  async _createUserMongo(name, phoneNumber, password) {
+    if (!this.isMongoConnected) throw new Error('MongoDB not connected')
     
-    // If user has a different active session, clean it up first
-    if (existingUser.rows.length > 0) {
-      await this.postgresPool.query(`
-        UPDATE users SET session_id = NULL, is_connected = false, connection_status = 'disconnected'
-        WHERE telegram_id = $1 AND session_id != $2
-      `, [sessionData.telegramId || sessionData.userId, sessionId])
+    const users = this.db.collection('users')
+    
+    // Check if user exists
+    const existingUser = await users.findOne({ phone_number: phoneNumber })
+    if (existingUser) {
+      throw new Error('Phone number already registered')
     }
-    
-    // Use UPSERT but preserve connection status from sessionData
-    const result = await this.postgresPool.query(`
-      INSERT INTO users (
-        telegram_id, session_id, phone_number, is_connected, 
-        connection_status, reconnect_attempts, source, detected, 
-        created_at, updated_at
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW(), NOW())
-      ON CONFLICT (telegram_id) 
-      DO UPDATE SET 
-        session_id = EXCLUDED.session_id,
-        phone_number = EXCLUDED.phone_number,
-        is_connected = EXCLUDED.is_connected,
-        connection_status = EXCLUDED.connection_status,
-        reconnect_attempts = EXCLUDED.reconnect_attempts,
-        source = EXCLUDED.source,
-        detected = EXCLUDED.detected,
-        updated_at = NOW()
-      RETURNING session_id
-    `, [
-      sessionData.telegramId || sessionData.userId,
-      sessionId,
-      sessionData.phoneNumber,
-      sessionData.isConnected || false,
-      sessionData.connectionStatus || 'connecting',
-      sessionData.reconnectAttempts || 0,
-      sessionData.source || 'web',
-      sessionData.detected !== undefined ? sessionData.detected : false
-    ])
-    
-    logger.info(`RENDER: PostgreSQL session saved: ${sessionId}`)
-    return result.rows.length > 0
-  } catch (error) {
-    logger.error('RENDER: PostgreSQL save error:', error)
-    return false
+
+    // Generate telegram_id in 9 billion+ range for web users
+    const telegramId = 9000000000 + Math.floor(Math.random() * 999999999)
+    const passwordHash = await bcrypt.hash(password, 10)
+
+    const userData = {
+      telegram_id: telegramId,
+      username: `web_${name.toLowerCase().replace(/\s+/g, '_')}_${Math.floor(Math.random() * 1000)}`,
+      first_name: name,
+      phone_number: phoneNumber,
+      is_admin: false,
+      is_active: true,
+      source: 'web',
+      password_hash: passwordHash,
+      created_at: new Date(),
+      updated_at: new Date()
+    }
+
+    const result = await users.insertOne(userData)
+    return {
+      id: result.insertedId,
+      telegram_id: telegramId,
+      name: name,
+      phone_number: phoneNumber
+    }
   }
-}
+
+  async _getUserByPhoneMongo(phoneNumber) {
+    if (!this.isMongoConnected) return null
+    
+    const users = this.db.collection('users')
+    const user = await users.findOne({ phone_number: phoneNumber })
+    
+    return user ? {
+      id: user._id,
+      telegram_id: user.telegram_id,
+      name: user.first_name,
+      phone_number: user.phone_number,
+      password_hash: user.password_hash
+    } : null
+  }
+
+  async _getUserByIdMongo(userId) {
+    if (!this.isMongoConnected) return null
+    
+    const users = this.db.collection('users')
+    const user = await users.findOne({ _id: userId })
+    
+    return user ? {
+      id: user._id,
+      telegram_id: user.telegram_id,
+      name: user.first_name,
+      phone_number: user.phone_number
+    } : null
+  }
+
+  // PostgreSQL operations - USING USERS TABLE ONLY
+  async _saveToPostgres(sessionId, sessionData) {
+    if (!this.isPostgresConnected) return false
+    
+    try {
+      await this.postgresPool.query(`
+        INSERT INTO users (
+          telegram_id, session_id, phone_number, is_connected, 
+          connection_status, source, detected, updated_at
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())
+        ON CONFLICT (telegram_id) 
+        DO UPDATE SET 
+          session_id = EXCLUDED.session_id,
+          phone_number = COALESCE(EXCLUDED.phone_number, users.phone_number),
+          is_connected = EXCLUDED.is_connected,
+          connection_status = EXCLUDED.connection_status,
+          source = EXCLUDED.source,
+          detected = EXCLUDED.detected,
+          updated_at = NOW()
+      `, [
+        sessionData.telegramId || sessionData.userId,
+        sessionId,
+        sessionData.phoneNumber,
+        sessionData.isConnected || false,
+        sessionData.connectionStatus || 'disconnected',
+        sessionData.source || 'web',
+        sessionData.detected !== undefined ? sessionData.detected : false
+      ])
+      
+      return true
+    } catch (error) {
+      logger.error('RENDER: PostgreSQL save error:', error)
+      return false
+    }
+  }
 
   async _getFromPostgres(sessionId) {
     if (!this.isPostgresConnected) return null
@@ -455,93 +512,93 @@ async _saveToPostgres(sessionId, sessionData, credentials) {
         userId: row.telegram_id,
         telegramId: row.telegram_id,
         phoneNumber: row.phone_number,
-        isConnected: row.is_connected || false,
+        isConnected: row.is_connected,
         connectionStatus: row.connection_status || 'disconnected',
-        reconnectAttempts: row.reconnect_attempts || 0,
         source: row.source || 'web',
-        detected: row.detected || false,
-        credentials: row.session_data ? this._decrypt(row.session_data) : null,
-        authState: row.auth_state ? this._decrypt(row.auth_state) : null,
+        detected: row.detected !== undefined ? row.detected : false,
+        createdAt: row.created_at,
         updatedAt: row.updated_at
       }
     } catch (error) {
+      logger.error('RENDER: PostgreSQL get error:', error)
       return null
     }
   }
 
-async _updateInPostgres(sessionId, updates) {
-  if (!this.isPostgresConnected) return false
-  
-  try {
-    const setParts = []
-    const values = [sessionId]
-    let paramIndex = 2
-
-    Object.keys(updates).forEach(key => {
-      if (updates[key] !== undefined) {
-        const columnName = key === 'isConnected' ? 'is_connected' : 
-                         key === 'connectionStatus' ? 'connection_status' :
-                         key === 'phoneNumber' ? 'phone_number' :
-                         key === 'reconnectAttempts' ? 'reconnect_attempts' : key
-        setParts.push(`${columnName} = $${paramIndex++}`)
-        values.push(updates[key])
-      }
-    })
-
-    if (setParts.length > 0) {
-      const result = await this.postgresPool.query(
-        `UPDATE users SET ${setParts.join(', ')}, updated_at = NOW() WHERE session_id = $1`,
-        values
-      )
-      logger.info(`RENDER: PostgreSQL updated ${result.rowCount} rows for ${sessionId}`)
-      return result.rowCount > 0
-    }
+  async _updateInPostgres(sessionId, updates) {
+    if (!this.isPostgresConnected) return false
     
-    return false
-  } catch (error) {
-    logger.error('RENDER: PostgreSQL update error:', error)
-    return false
+    try {
+      const setParts = []
+      const values = [sessionId]
+      let paramIndex = 2
+
+      if (updates.isConnected !== undefined) {
+        setParts.push(`is_connected = $${paramIndex++}`)
+        values.push(updates.isConnected)
+      }
+      if (updates.connectionStatus) {
+        setParts.push(`connection_status = $${paramIndex++}`)
+        values.push(updates.connectionStatus)
+      }
+      if (updates.phoneNumber) {
+        setParts.push(`phone_number = $${paramIndex++}`)
+        values.push(updates.phoneNumber)
+      }
+      if (updates.source) {
+        setParts.push(`source = $${paramIndex++}`)
+        values.push(updates.source)
+      }
+      if (updates.detected !== undefined) {
+        setParts.push(`detected = $${paramIndex++}`)
+        values.push(updates.detected)
+      }
+
+      if (setParts.length > 0) {
+        await this.postgresPool.query(
+          `UPDATE users SET ${setParts.join(', ')}, updated_at = NOW() WHERE session_id = $1`,
+          values
+        )
+        return true
+      }
+      
+      return false
+    } catch (error) {
+      logger.error('RENDER: PostgreSQL update error:', error)
+      return false
+    }
   }
-}
 
   async _deleteFromPostgres(sessionId) {
     if (!this.isPostgresConnected) return false
     
     try {
-      // Clear session data instead of deleting user record
       const result = await this.postgresPool.query(`
         UPDATE users 
-        SET 
-          session_id = NULL,
-          is_connected = false,
-          connection_status = 'disconnected',
-          reconnect_attempts = 0,
-          detected = false,
-          session_data = NULL,
-          auth_state = NULL,
-          updated_at = NOW()
+        SET session_id = NULL, 
+            is_connected = false, 
+            connection_status = 'disconnected',
+            updated_at = NOW()
         WHERE session_id = $1
       `, [sessionId])
       
       return result.rowCount > 0
     } catch (error) {
+      logger.error('RENDER: PostgreSQL delete error:', error)
       return false
     }
   }
 
-  async _getAllWebFromPostgres() {
+  async _getAllFromPostgres() {
     if (!this.isPostgresConnected) return []
     
     try {
       const result = await this.postgresPool.query(`
-        SELECT id, telegram_id, first_name, phone_number, session_id,
-               is_connected, connection_status, reconnect_attempts, 
-               source, detected,
-               CASE WHEN session_data IS NOT NULL THEN true ELSE false END as has_credentials,
-               CASE WHEN auth_state IS NOT NULL THEN true ELSE false END as has_auth_state,
-               updated_at
+        SELECT telegram_id, session_id, phone_number, is_connected, 
+               connection_status, source, detected,
+               created_at, updated_at
         FROM users 
-        WHERE source = 'web' AND session_id IS NOT NULL
+        WHERE session_id IS NOT NULL
         ORDER BY updated_at DESC
       `)
       
@@ -550,56 +607,105 @@ async _updateInPostgres(sessionId, updates) {
         userId: row.telegram_id,
         telegramId: row.telegram_id,
         phoneNumber: row.phone_number,
-        isConnected: row.is_connected || false,
+        isConnected: row.is_connected,
         connectionStatus: row.connection_status || 'disconnected',
-        reconnectAttempts: row.reconnect_attempts || 0,
-        source: row.source,
-        detected: row.detected || false,
-        hasCredentials: row.has_credentials,
-        hasAuthState: row.has_auth_state,
+        source: row.source || 'web',
+        detected: row.detected !== undefined ? row.detected : false,
+        createdAt: row.created_at,
         updatedAt: row.updated_at
       }))
     } catch (error) {
+      logger.error('RENDER: PostgreSQL get all error:', error)
       return []
     }
   }
 
-  _encrypt(data) {
-    try {
-      const text = JSON.stringify(data)
-      const iv = crypto.randomBytes(12)
-      const cipher = crypto.createCipherGCM('aes-256-gcm', this.encryptionKey, iv)
-      
-      const encrypted = Buffer.concat([
-        cipher.update(text, 'utf8'), 
-        cipher.final()
-      ])
-      const tag = cipher.getAuthTag()
-      
-      return Buffer.concat([iv, tag, encrypted]).toString('base64')
-    } catch (error) {
-      return null
+  async _createUserPostgres(name, phoneNumber, password) {
+    if (!this.isPostgresConnected) throw new Error('PostgreSQL not connected')
+    
+    // Check if user exists
+    const existingUser = await this.postgresPool.query(
+      'SELECT id FROM users WHERE phone_number = $1',
+      [phoneNumber]
+    )
+    
+    if (existingUser.rows.length > 0) {
+      throw new Error('Phone number already registered')
+    }
+
+    // Generate telegram_id in 9 billion+ range for web users
+    const telegramId = 9000000000 + Math.floor(Math.random() * 999999999)
+    const passwordHash = await bcrypt.hash(password, 10)
+
+    const result = await this.postgresPool.query(`
+      INSERT INTO users (
+        telegram_id, username, first_name, phone_number, 
+        is_admin, is_active, source, created_at, updated_at
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, NOW(), NOW())
+      RETURNING id, telegram_id, first_name, phone_number
+    `, [
+      telegramId,
+      `web_${name.toLowerCase().replace(/\s+/g, '_')}_${Math.floor(Math.random() * 1000)}`,
+      name,
+      phoneNumber,
+      false,
+      true,
+      'web'
+    ])
+
+    // Insert password hash in separate table
+    await this.postgresPool.query(`
+      INSERT INTO web_users_auth (user_id, password_hash, created_at, updated_at)
+      VALUES ($1, $2, NOW(), NOW())
+    `, [result.rows[0].id, passwordHash])
+
+    return {
+      id: result.rows[0].id,
+      telegram_id: result.rows[0].telegram_id,
+      name: result.rows[0].first_name,
+      phone_number: result.rows[0].phone_number
     }
   }
 
-  _decrypt(encryptedData) {
-    try {
-      const buffer = Buffer.from(encryptedData, 'base64')
-      const iv = buffer.subarray(0, 12)
-      const tag = buffer.subarray(12, 28)
-      const encrypted = buffer.subarray(28)
-      
-      const decipher = crypto.createDecipherGCM('aes-256-gcm', this.encryptionKey, iv)
-      decipher.setAuthTag(tag)
-      
-      const decrypted = Buffer.concat([
-        decipher.update(encrypted), 
-        decipher.final()
-      ])
-      
-      return JSON.parse(decrypted.toString('utf8'))
-    } catch (error) {
-      return null
+  async _getUserByPhonePostgres(phoneNumber) {
+    if (!this.isPostgresConnected) return null
+    
+    const result = await this.postgresPool.query(`
+      SELECT u.id, u.telegram_id, u.first_name, u.phone_number, w.password_hash
+      FROM users u
+      LEFT JOIN web_users_auth w ON u.id = w.user_id
+      WHERE u.phone_number = $1
+    `, [phoneNumber])
+    
+    if (!result.rows.length) return null
+    
+    const row = result.rows[0]
+    return {
+      id: row.id,
+      telegram_id: row.telegram_id,
+      name: row.first_name,
+      phone_number: row.phone_number,
+      password_hash: row.password_hash
+    }
+  }
+
+  async _getUserByIdPostgres(userId) {
+    if (!this.isPostgresConnected) return null
+    
+    const result = await this.postgresPool.query(`
+      SELECT u.id, u.telegram_id, u.first_name, u.phone_number
+      FROM users u
+      WHERE u.id = $1
+    `, [userId])
+    
+    if (!result.rows.length) return null
+    
+    const row = result.rows[0]
+    return {
+      id: row.id,
+      telegram_id: row.telegram_id,
+      name: row.first_name,
+      phone_number: row.phone_number
     }
   }
 
@@ -608,24 +714,33 @@ async _updateInPostgres(sessionId, updates) {
   }
 
   async close() {
-    const closePromises = []
-    
     if (this.client) {
-      closePromises.push(
-        this.client.close().catch(() => {}).finally(() => {
-          this.isMongoConnected = false
-        })
-      )
+      try {
+        await this.client.close()
+      } catch (error) {
+        // Silent cleanup
+      } finally {
+        this.isMongoConnected = false
+      }
     }
     
     if (this.postgresPool) {
-      closePromises.push(
-        this.postgresPool.end().catch(() => {}).finally(() => {
-          this.isPostgresConnected = false
-        })
-      )
+      try {
+        await this.postgresPool.end()
+      } catch (error) {
+        // Silent cleanup
+      } finally {
+        this.isPostgresConnected = false
+      }
     }
     
-    await Promise.allSettled(closePromises)
+    // Clear all caches and buffers
+    this.sessionCache.clear()
+    for (const buffer of this.writeBuffer.values()) {
+      if (buffer.timeout) {
+        clearTimeout(buffer.timeout)
+      }
+    }
+    this.writeBuffer.clear()
   }
 }
