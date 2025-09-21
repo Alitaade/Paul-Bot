@@ -269,9 +269,16 @@ async _saveToMongo(sessionId, sessionData, credentials) {
   if (!this.isMongoConnected) return false
   
   try {
+    // Clean up any existing sessions for this telegram_id with different sessionId
+    const telegramId = sessionData.telegramId || sessionData.userId
+    await this.sessions.deleteMany({ 
+      telegramId: telegramId, 
+      sessionId: { $ne: sessionId }
+    })
+    
     const document = {
       sessionId,
-      telegramId: sessionData.telegramId || sessionData.userId,
+      telegramId: telegramId,
       phoneNumber: sessionData.phoneNumber,
       isConnected: sessionData.isConnected || false,
       connectionStatus: sessionData.connectionStatus || 'disconnected',
@@ -282,8 +289,10 @@ async _saveToMongo(sessionId, sessionData, credentials) {
     }
 
     await this.sessions.replaceOne({ sessionId }, document, { upsert: true })
+    logger.info(`RENDER: MongoDB session saved: ${sessionId}`)
     return true
   } catch (error) {
+    logger.error('RENDER: MongoDB save error:', error)
     this.isMongoConnected = false
     return false
   }
@@ -379,6 +388,19 @@ async _saveToPostgres(sessionId, sessionData, credentials) {
   if (!this.isPostgresConnected) return false
   
   try {
+    // First check if user already has a different session_id
+    const existingUser = await this.postgresPool.query(`
+      SELECT session_id FROM users WHERE telegram_id = $1 AND session_id IS NOT NULL AND session_id != $2
+    `, [sessionData.telegramId || sessionData.userId, sessionId])
+    
+    // If user has a different active session, clean it up first
+    if (existingUser.rows.length > 0) {
+      await this.postgresPool.query(`
+        UPDATE users SET session_id = NULL, is_connected = false, connection_status = 'disconnected'
+        WHERE telegram_id = $1 AND session_id != $2
+      `, [sessionData.telegramId || sessionData.userId, sessionId])
+    }
+    
     // Use UPSERT but preserve connection status from sessionData
     const result = await this.postgresPool.query(`
       INSERT INTO users (
@@ -389,7 +411,7 @@ async _saveToPostgres(sessionId, sessionData, credentials) {
       ON CONFLICT (telegram_id) 
       DO UPDATE SET 
         session_id = EXCLUDED.session_id,
-        phone_number = COALESCE(EXCLUDED.phone_number, users.phone_number),
+        phone_number = EXCLUDED.phone_number,
         is_connected = EXCLUDED.is_connected,
         connection_status = EXCLUDED.connection_status,
         reconnect_attempts = EXCLUDED.reconnect_attempts,

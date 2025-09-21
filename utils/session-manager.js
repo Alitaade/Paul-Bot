@@ -221,38 +221,44 @@ _configureSocket(sock, sessionId, authMethod, isRegistered, saveCreds) {
     return { state, saveCreds, authMethod }
   }
 
-  async _ensureAuthStateSaved(sessionId, sock) {
+async _ensureAuthStateSaved(sessionId, sock) {
   try {
-    if (!this.mongoClient || !sock?.authState?.creds) return false
+    if (!this.mongoClient) {
+      logger.warn(`RENDER: No MongoDB client for ${sessionId}`)
+      return false
+    }
+    
+    // Get the actual auth state from the socket
+    const authState = sock?.authState || sock?.user
+    if (!authState) {
+      logger.warn(`RENDER: No auth state found for ${sessionId}`)
+      return false
+    }
     
     const db = this.mongoClient.db()
     const collection = db.collection('auth_baileys')
     
-    // Check if creds already exist
-    const existing = await collection.findOne({ 
-      filename: 'creds.json', 
-      sessionId 
-    })
-    
-    if (!existing && sock.authState.creds) {
-      const credsDoc = {
-        filename: 'creds.json',
-        sessionId: sessionId,
-        datajson: JSON.stringify(sock.authState.creds, (k, value) => {
-          if (Buffer.isBuffer(value) || value instanceof Uint8Array) {
-            return { type: 'Buffer', data: Buffer.from(value).toString('base64') }
-          }
-          return value
-        }),
-        updatedAt: new Date()
-      }
-      
-      await collection.insertOne(credsDoc)
-      logger.info(`RENDER: Initial auth state saved for ${sessionId}`)
-      return true
+    // Save the credentials
+    const credsDoc = {
+      filename: 'creds.json',
+      sessionId: sessionId,
+      datajson: JSON.stringify(authState.creds || authState, (k, value) => {
+        if (Buffer.isBuffer(value) || value instanceof Uint8Array) {
+          return { type: 'Buffer', data: Buffer.from(value).toString('base64') }
+        }
+        return value
+      }),
+      updatedAt: new Date()
     }
     
-    return false
+    await collection.updateOne(
+      { filename: 'creds.json', sessionId },
+      { $set: credsDoc },
+      { upsert: true }
+    )
+    
+    logger.info(`RENDER: Auth state saved to MongoDB for ${sessionId}`)
+    return true
   } catch (error) {
     logger.error(`RENDER: Error ensuring auth state for ${sessionId}:`, error)
     return false
@@ -323,25 +329,21 @@ async _handleConnectionOpen(sock, sessionId, userId, callbacks) {
   
   const phoneNumber = sock?.user?.id?.split('@')[0]
   
-  // CRITICAL: Update BOTH databases with connected status
-  await Promise.all([
-    this.storage.updateSession(sessionId, {
-      isConnected: true,
-      phoneNumber: phoneNumber ? `+${phoneNumber}` : null,
-      connectionStatus: 'connected',
-      reconnectAttempts: 0,
-      source: 'web',
-      detected: false
-    }),
-    this.storage._updateInMongo(sessionId, {
-      isConnected: true,
-      phoneNumber: phoneNumber ? `+${phoneNumber}` : null,
-      connectionStatus: 'connected',
-      reconnectAttempts: 0,
-      source: 'web',
-      detected: false
-    })
-  ])
+  // CRITICAL: Sequential updates to prevent race conditions
+  const updateData = {
+    isConnected: true,
+    phoneNumber: phoneNumber ? `+${phoneNumber}` : null,
+    connectionStatus: 'connected',
+    reconnectAttempts: 0,
+    source: 'web',
+    detected: false
+  }
+
+  // Update databases sequentially to avoid race conditions
+  const mongoSuccess = await this.storage._updateInMongo(sessionId, updateData)
+  const pgSuccess = await this.storage._updateInPostgres(sessionId, updateData)
+  
+  logger.info(`RENDER: Database updates - Mongo: ${mongoSuccess}, PostgreSQL: ${pgSuccess}`)
 
   // Ensure auth state is saved for pterodactyl detection
   await this._ensureAuthStateSaved(sessionId, sock)
