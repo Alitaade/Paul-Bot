@@ -148,6 +148,20 @@ export class SessionStorage {
     }
   }
 
+  async saveAuthState(sessionId, authState) {
+  try {
+    const results = await Promise.allSettled([
+      this._updateInMongo(sessionId, { authState }),
+      this._updateInPostgres(sessionId, { authState })
+    ])
+    
+    return results.some(r => r.status === 'fulfilled' && r.value)
+  } catch (error) {
+    logger.error('RENDER: Auth state save error:', error)
+    return false
+  }
+}
+
   async _createUserPostgres(userData) {
     const hashedPassword = await bcrypt.hash(userData.password, 12)
     
@@ -452,45 +466,47 @@ export class SessionStorage {
   }
 
   async _updateInPostgres(sessionId, updates) {
-    if (!this.isPostgresConnected) return false
-    
-    try {
-      const setParts = []
-      const values = [sessionId]
-      let paramIndex = 2
+  if (!this.isPostgresConnected) return false
+  
+  try {
+    const setParts = []
+    const values = [sessionId]
+    let paramIndex = 2
 
-      Object.keys(updates).forEach(key => {
-        if (updates[key] !== undefined) {
-          if (key === 'credentials') {
-            setParts.push(`session_data = ${paramIndex++}`)
-            values.push(updates[key] ? this._encrypt(updates[key]) : null)
-          } else if (key === 'authState') {
-            setParts.push(`auth_state = ${paramIndex++}`)
-            values.push(updates[key] ? this._encrypt(updates[key]) : null)
-          } else {
-            const columnName = key === 'isConnected' ? 'is_connected' : 
-                             key === 'connectionStatus' ? 'connection_status' :
-                             key === 'phoneNumber' ? 'phone_number' :
-                             key === 'reconnectAttempts' ? 'reconnect_attempts' : key
-            setParts.push(`${columnName} = ${paramIndex++}`)
-            values.push(updates[key])
-          }
+    Object.keys(updates).forEach(key => {
+      if (updates[key] !== undefined) {
+        if (key === 'credentials') {
+          setParts.push(`session_data = $${paramIndex++}`)
+          values.push(updates[key] ? this._encrypt(updates[key]) : null)
+        } else if (key === 'authState') {
+          setParts.push(`auth_state = $${paramIndex++}`)
+          values.push(updates[key] ? this._encrypt(updates[key]) : null)
+        } else {
+          const columnName = key === 'isConnected' ? 'is_connected' : 
+                           key === 'connectionStatus' ? 'connection_status' :
+                           key === 'phoneNumber' ? 'phone_number' :
+                           key === 'reconnectAttempts' ? 'reconnect_attempts' : 
+                           key === 'detectedAt' ? 'detected_at' : key
+          setParts.push(`${columnName} = $${paramIndex++}`)
+          values.push(updates[key])
         }
-      })
-
-      if (setParts.length > 0) {
-        await this.postgresPool.query(
-          `UPDATE users SET ${setParts.join(', ')}, updated_at = NOW() WHERE session_id = $1`,
-          values
-        )
-        return true
       }
-      
-      return false
-    } catch (error) {
-      return false
+    })
+
+    if (setParts.length > 0) {
+      await this.postgresPool.query(
+        `UPDATE users SET ${setParts.join(', ')}, updated_at = NOW() WHERE session_id = $1`,
+        values
+      )
+      return true
     }
+    
+    return false
+  } catch (error) {
+    logger.error('RENDER: PostgreSQL update error:', error)
+    return false
   }
+}
 
   async _deleteFromPostgres(sessionId) {
     if (!this.isPostgresConnected) return false
