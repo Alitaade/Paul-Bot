@@ -375,7 +375,7 @@ class WhatsAppSessionManager {
       
       logger.info(`RENDER: Starting pairing process for ${sessionId} with ${phoneNumber}`)
       
-      const { handlePairing } = await import("../utils/pairing.js")
+      const { handlePairing } = await import("./pairing.js")
       await handlePairing(sock, sessionId, phoneNumber, this.pairingCodes, callbacks)
       
       logger.info(`RENDER: ${sessionId} pairing completed, waiting for connection...`)
@@ -462,3 +462,4 @@ export function getSessionManager() {
 
 export const sessionManager = getSessionManager()
 export default getSessionManager
+
