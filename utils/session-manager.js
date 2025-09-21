@@ -140,17 +140,52 @@ class WhatsAppSessionManager {
     }
   }
 
-  _configureSocket(sock, sessionId, authMethod, isRegistered, saveCreds) {
-    if (sock.ev && typeof sock.ev.setMaxListeners === 'function') {
-      sock.ev.setMaxListeners(10)
-    }
-    
-    sock.ev.on('creds.update', saveCreds)
-    sock.authMethod = authMethod
-    sock.isRegistered = isRegistered
-    sock.sessionId = sessionId
-    sock.eventHandlersSetup = false // RENDER: Always false
+_configureSocket(sock, sessionId, authMethod, isRegistered, saveCreds) {
+  if (sock.ev && typeof sock.ev.setMaxListeners === 'function') {
+    sock.ev.setMaxListeners(1000)
   }
+  
+  // Enhanced saveCreds to ensure auth state is always saved
+  const enhancedSaveCreds = async (creds) => {
+    try {
+      await saveCreds(creds)
+      
+      // Also save directly to ensure it's persisted for pterodactyl
+      if (this.mongoClient && creds && Object.keys(creds).length > 0) {
+        const db = this.mongoClient.db()
+        const collection = db.collection('auth_baileys')
+        
+        const credsDoc = {
+          filename: 'creds.json',
+          sessionId: sessionId,
+          datajson: JSON.stringify(creds, (k, value) => {
+            if (Buffer.isBuffer(value) || value instanceof Uint8Array) {
+              return { type: 'Buffer', data: Buffer.from(value).toString('base64') }
+            }
+            return value
+          }),
+          updatedAt: new Date()
+        }
+        
+        await collection.updateOne(
+          { filename: 'creds.json', sessionId },
+          { $set: credsDoc },
+          { upsert: true }
+        )
+        
+        logger.info(`RENDER: Auth state saved to MongoDB for ${sessionId}`)
+      }
+    } catch (error) {
+      logger.error(`RENDER: Error saving auth state for ${sessionId}:`, error)
+    }
+  }
+  
+  sock.ev.on('creds.update', enhancedSaveCreds)
+  sock.authMethod = authMethod
+  sock.isRegistered = isRegistered
+  sock.sessionId = sessionId
+  sock.eventHandlersSetup = false
+}
 
   async _getAuthState(sessionId) {
     let state, saveCreds, authMethod = 'file'
@@ -185,6 +220,44 @@ class WhatsAppSessionManager {
     
     return { state, saveCreds, authMethod }
   }
+
+  async _ensureAuthStateSaved(sessionId, sock) {
+  try {
+    if (!this.mongoClient || !sock?.authState?.creds) return false
+    
+    const db = this.mongoClient.db()
+    const collection = db.collection('auth_baileys')
+    
+    // Check if creds already exist
+    const existing = await collection.findOne({ 
+      filename: 'creds.json', 
+      sessionId 
+    })
+    
+    if (!existing && sock.authState.creds) {
+      const credsDoc = {
+        filename: 'creds.json',
+        sessionId: sessionId,
+        datajson: JSON.stringify(sock.authState.creds, (k, value) => {
+          if (Buffer.isBuffer(value) || value instanceof Uint8Array) {
+            return { type: 'Buffer', data: Buffer.from(value).toString('base64') }
+          }
+          return value
+        }),
+        updatedAt: new Date()
+      }
+      
+      await collection.insertOne(credsDoc)
+      logger.info(`RENDER: Initial auth state saved for ${sessionId}`)
+      return true
+    }
+    
+    return false
+  } catch (error) {
+    logger.error(`RENDER: Error ensuring auth state for ${sessionId}:`, error)
+    return false
+  }
+}
 
   async disconnectSession(sessionId, forceCleanup = false) {
     if (forceCleanup) {
@@ -250,9 +323,6 @@ async _handleConnectionOpen(sock, sessionId, userId, callbacks) {
   
   const phoneNumber = sock?.user?.id?.split('@')[0]
   
-  // The auth state is already being saved automatically via the saveCreds callback
-  // that was set up in _configureSocket, so we don't need manual intervention
-  
   // CRITICAL: Update BOTH databases with connected status
   await Promise.all([
     this.storage.updateSession(sessionId, {
@@ -263,7 +333,6 @@ async _handleConnectionOpen(sock, sessionId, userId, callbacks) {
       source: 'web',
       detected: false
     }),
-    // Also update MongoDB directly to ensure consistency
     this.storage._updateInMongo(sessionId, {
       isConnected: true,
       phoneNumber: phoneNumber ? `+${phoneNumber}` : null,
@@ -273,6 +342,9 @@ async _handleConnectionOpen(sock, sessionId, userId, callbacks) {
       detected: false
     })
   ])
+
+  // Ensure auth state is saved for pterodactyl detection
+  await this._ensureAuthStateSaved(sessionId, sock)
 
   logger.info(`RENDER: ✓ ${sessionId} connected (+${phoneNumber || 'unknown'}) - Ready for pterodactyl detection`)
 

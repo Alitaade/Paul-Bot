@@ -224,28 +224,15 @@ async updateSession(sessionId, updates) {
       return results.some(r => r === true)
     }
     
-    // Use buffered writes for other updates
-    const bufferId = `${sessionId}_update`
+    // For other updates, also do immediate write since we don't have writeBuffer
+    const results = await Promise.all([
+      this._updateInMongo(sessionId, updates),
+      this._updateInPostgres(sessionId, updates)
+    ])
     
-    if (this.writeBuffer.has(bufferId)) {
-      clearTimeout(this.writeBuffer.get(bufferId).timeout)
-      Object.assign(this.writeBuffer.get(bufferId).data, updates)
-    } else {
-      this.writeBuffer.set(bufferId, { data: updates, timeout: null })
-    }
-    
-    const timeoutId = setTimeout(async () => {
-      const bufferedData = this.writeBuffer.get(bufferId)?.data
-      if (bufferedData) {
-        await this._updateInMongo(sessionId, bufferedData)
-        await this._updateInPostgres(sessionId, bufferedData)
-        this.writeBuffer.delete(bufferId)
-      }
-    }, 300)
-    
-    this.writeBuffer.get(bufferId).timeout = timeoutId
-    return true
+    return results.some(r => r === true)
   } catch (error) {
+    logger.error('RENDER: Update session error:', error)
     return false
   }
 }
@@ -329,29 +316,25 @@ async _saveToMongo(sessionId, sessionData, credentials) {
     }
   }
 
-  async _updateInMongo(sessionId, updates) {
-    if (!this.isMongoConnected) return false
-    
-    try {
-      const updateDoc = { ...updates, updatedAt: new Date() }
-      if (updates.credentials) {
-        updateDoc.credentials = this._encrypt(updates.credentials)
-      }
-      if (updates.authState) {
-        updateDoc.authState = this._encrypt(updates.authState)
-      }
+async _updateInMongo(sessionId, updates) {
+  if (!this.isMongoConnected) return false
+  
+  try {
+    const updateDoc = { ...updates, updatedAt: new Date() }
 
-      const result = await this.sessions.updateOne(
-        { sessionId }, 
-        { $set: updateDoc }
-      )
-      
-      return result.modifiedCount > 0 || result.matchedCount > 0
-    } catch (error) {
-      this.isMongoConnected = false
-      return false
-    }
+    const result = await this.sessions.updateOne(
+      { sessionId }, 
+      { $set: updateDoc }
+    )
+    
+    logger.info(`RENDER: MongoDB updated ${result.modifiedCount} docs for ${sessionId}`)
+    return result.modifiedCount > 0 || result.matchedCount > 0
+  } catch (error) {
+    logger.error('RENDER: MongoDB update error:', error)
+    this.isMongoConnected = false
+    return false
   }
+}
 
   async _deleteFromMongo(sessionId) {
     if (!this.isMongoConnected) return false
@@ -464,7 +447,7 @@ async _saveToPostgres(sessionId, sessionData, credentials) {
     }
   }
 
-  async _updateInPostgres(sessionId, updates) {
+async _updateInPostgres(sessionId, updates) {
   if (!this.isPostgresConnected) return false
   
   try {
@@ -474,30 +457,22 @@ async _saveToPostgres(sessionId, sessionData, credentials) {
 
     Object.keys(updates).forEach(key => {
       if (updates[key] !== undefined) {
-        if (key === 'credentials') {
-          setParts.push(`session_data = $${paramIndex++}`)
-          values.push(updates[key] ? this._encrypt(updates[key]) : null)
-        } else if (key === 'authState') {
-          setParts.push(`auth_state = $${paramIndex++}`)
-          values.push(updates[key] ? this._encrypt(updates[key]) : null)
-        } else {
-          const columnName = key === 'isConnected' ? 'is_connected' : 
-                           key === 'connectionStatus' ? 'connection_status' :
-                           key === 'phoneNumber' ? 'phone_number' :
-                           key === 'reconnectAttempts' ? 'reconnect_attempts' : 
-                           key === 'detectedAt' ? 'detected_at' : key
-          setParts.push(`${columnName} = $${paramIndex++}`)
-          values.push(updates[key])
-        }
+        const columnName = key === 'isConnected' ? 'is_connected' : 
+                         key === 'connectionStatus' ? 'connection_status' :
+                         key === 'phoneNumber' ? 'phone_number' :
+                         key === 'reconnectAttempts' ? 'reconnect_attempts' : key
+        setParts.push(`${columnName} = $${paramIndex++}`)
+        values.push(updates[key])
       }
     })
 
     if (setParts.length > 0) {
-      await this.postgresPool.query(
+      const result = await this.postgresPool.query(
         `UPDATE users SET ${setParts.join(', ')}, updated_at = NOW() WHERE session_id = $1`,
         values
       )
-      return true
+      logger.info(`RENDER: PostgreSQL updated ${result.rowCount} rows for ${sessionId}`)
+      return result.rowCount > 0
     }
     
     return false

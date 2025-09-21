@@ -259,11 +259,11 @@ function startMonitoring() {
     logSystemStats()
   }, 120000)
   
-  // Keep-alive self ping (every 4 minutes to prevent sleeping)
+  // Keep-alive self ping (every 14 minutes to prevent sleeping)
   if (keepAliveInterval) clearInterval(keepAliveInterval)
   keepAliveInterval = setInterval(() => {
     keepAlivePing()
-  }, 240000) // 4 minutes
+  }, 840000) // 14 minutes
   
   logger.info("Monitoring and keep-alive intervals started")
 }

@@ -422,7 +422,7 @@ onConnected: async (sock) => {
     }
   }
 
-  async checkConnectionStatus(req, res) {
+async checkConnectionStatus(req, res) {
   try {
     const { sessionId } = req.params
     
@@ -430,14 +430,14 @@ onConnected: async (sock) => {
       return res.status(400).json({ error: 'Invalid session ID' })
     }
 
-    // Check both render and database status
-    const renderConnected = await this.sessionManager.isReallyConnected(sessionId)
+    // Get fresh session data from database
     const session = await this.storage.getSession(sessionId)
+    const renderConnected = await this.sessionManager.isReallyConnected(sessionId)
     
-    // Use the most recent status information
-    const isConnected = renderConnected || (session?.isConnected && session?.connectionStatus === 'connected')
+    // Use database status as primary source since socket may be cleaned up
+    const isConnected = session?.isConnected || false
     
-    logger.info(`RENDER: Status check for ${sessionId} - Render: ${renderConnected}, DB: ${session?.isConnected}, Final: ${isConnected}`)
+    logger.info(`RENDER: Status check for ${sessionId} - DB connected: ${session?.isConnected}, Status: ${session?.connectionStatus}`)
     
     res.json({
       isConnected,
