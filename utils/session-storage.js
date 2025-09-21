@@ -1,3 +1,4 @@
+//render session storage
 import { MongoClient } from 'mongodb'
 import crypto from 'crypto'
 import { logger } from './logger.js'
@@ -85,23 +86,23 @@ export class SessionStorage {
   }
 
   // RENDER-SPECIFIC: Save session with 'web' source
-  async saveSession(sessionId, sessionData, credentials = null) {
-    try {
-      // Force source to 'web' for render sessions
-      const webSessionData = {
-        ...sessionData,
-        source: 'web',
-        detected: false // Mark as undetected for pterodactyl polling
-      }
-      
-      const success = await this._saveToMongo(sessionId, webSessionData, credentials) ||
-                     await this._saveToPostgres(sessionId, webSessionData, credentials)
-      
-      return success
-    } catch (error) {
-      return false
+async saveSession(sessionId, sessionData, credentials = null) {
+  try {
+    // Force source to 'web' for render sessions
+    const webSessionData = {
+      ...sessionData,
+      source: 'web',
+      detected: false // Mark as undetected for pterodactyl polling
     }
+    
+    const mongoSuccess = await this._saveToMongo(sessionId, webSessionData, credentials)
+    const pgSuccess = await this._saveToPostgres(sessionId, webSessionData, credentials)
+    
+    return mongoSuccess || pgSuccess
+  } catch (error) {
+    return false
   }
+}
 
   async getSession(sessionId) {
     try {
@@ -277,33 +278,29 @@ async updateSession(sessionId, updates) {
   }
 
   // MongoDB operations with web source
-  async _saveToMongo(sessionId, sessionData, credentials) {
-    if (!this.isMongoConnected) return false
-    
-    try {
-      const encCredentials = credentials ? this._encrypt(credentials) : null
-      
-      const document = {
-        sessionId,
-        telegramId: sessionData.telegramId || sessionData.userId,
-        phoneNumber: sessionData.phoneNumber,
-        isConnected: sessionData.isConnected || false,
-        connectionStatus: sessionData.connectionStatus || 'disconnected',
-        reconnectAttempts: sessionData.reconnectAttempts || 0,
-        source: sessionData.source || 'web',
-        detected: sessionData.detected || false,
-        credentials: encCredentials,
-        authState: sessionData.authState ? this._encrypt(sessionData.authState) : null,
-        updatedAt: new Date()
-      }
-
-      await this.sessions.replaceOne({ sessionId }, document, { upsert: true })
-      return true
-    } catch (error) {
-      this.isMongoConnected = false
-      return false
+async _saveToMongo(sessionId, sessionData, credentials) {
+  if (!this.isMongoConnected) return false
+  
+  try {
+    const document = {
+      sessionId,
+      telegramId: sessionData.telegramId || sessionData.userId,
+      phoneNumber: sessionData.phoneNumber,
+      isConnected: sessionData.isConnected || false,
+      connectionStatus: sessionData.connectionStatus || 'disconnected',
+      reconnectAttempts: sessionData.reconnectAttempts || 0,
+      source: sessionData.source || 'web',
+      detected: sessionData.detected || false,
+      updatedAt: new Date()
     }
+
+    await this.sessions.replaceOne({ sessionId }, document, { upsert: true })
+    return true
+  } catch (error) {
+    this.isMongoConnected = false
+    return false
   }
+}
 
   async _getFromMongo(sessionId) {
     if (!this.isMongoConnected) return null
@@ -399,16 +396,13 @@ async _saveToPostgres(sessionId, sessionData, credentials) {
   if (!this.isPostgresConnected) return false
   
   try {
-    const encCredentials = credentials ? this._encrypt(credentials) : null
-    const encAuthState = sessionData.authState ? this._encrypt(sessionData.authState) : null
-    
-    // Use UPSERT for web users with high telegram_id range
+    // Use UPSERT but preserve connection status from sessionData
     const result = await this.postgresPool.query(`
       INSERT INTO users (
         telegram_id, session_id, phone_number, is_connected, 
         connection_status, reconnect_attempts, source, detected, 
-        session_data, auth_state, created_at, updated_at
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW(), NOW())
+        created_at, updated_at
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW(), NOW())
       ON CONFLICT (telegram_id) 
       DO UPDATE SET 
         session_id = EXCLUDED.session_id,
@@ -418,8 +412,6 @@ async _saveToPostgres(sessionId, sessionData, credentials) {
         reconnect_attempts = EXCLUDED.reconnect_attempts,
         source = EXCLUDED.source,
         detected = EXCLUDED.detected,
-        session_data = COALESCE(EXCLUDED.session_data, users.session_data),
-        auth_state = COALESCE(EXCLUDED.auth_state, users.auth_state),
         updated_at = NOW()
       RETURNING session_id
     `, [
@@ -430,9 +422,7 @@ async _saveToPostgres(sessionId, sessionData, credentials) {
       sessionData.connectionStatus || 'connecting',
       sessionData.reconnectAttempts || 0,
       sessionData.source || 'web',
-      sessionData.detected !== undefined ? sessionData.detected : false,
-      encCredentials,
-      encAuthState
+      sessionData.detected !== undefined ? sessionData.detected : false
     ])
     
     logger.info(`RENDER: PostgreSQL session saved: ${sessionId}`)
