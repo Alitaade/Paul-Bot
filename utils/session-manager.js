@@ -319,6 +319,31 @@ async _handleConnectionClose(sessionId, lastDisconnect, callbacks) {
   return true
 }
   
+    async _reconnectSession(sessionId, callbacks) {
+    try {
+      const session = await this.storage.getSession(sessionId)
+      if (!session) {
+        logger.warn(`RENDER: Cannot reconnect ${sessionId} - session not found`)
+        return
+      }
+
+      logger.info(`RENDER: Reconnecting ${sessionId}...`)
+      
+      await this.createSession(
+        session.userId, 
+        session.phoneNumber, 
+        callbacks, 
+        true // isReconnect = true
+      )
+      
+    } catch (error) {
+      logger.error(`RENDER: Reconnect failed for ${sessionId}:`, error)
+      
+      // Try again after delay
+      setTimeout(() => this._reconnectSession(sessionId, callbacks), 5000)
+    }
+  }
+  
 
   // RENDER: Simplified cleanup
   _cleanupSocket(sessionId, sock) {
@@ -488,5 +513,6 @@ export function getSessionManager() {
 
 export const sessionManager = getSessionManager()
 export default getSessionManager
+
 
 
