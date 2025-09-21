@@ -338,32 +338,47 @@ class WebInterface {
   }
 
   startConnectionMonitoring() {
-    if (this.connectionCheckInterval) {
-      clearInterval(this.connectionCheckInterval)
-    }
-
-    this.connectionCheckInterval = setInterval(async () => {
-      if (!this.currentSessionId) return
-
-      try {
-        const response = await fetch(`/api/connection-status/${this.currentSessionId}`)
-        const result = await response.json()
-
-        if (response.ok && result.isConnected) {
-          // Connection successful!
-          this.stopConnectionMonitoring()
-          this.showConnectionSuccess(result.phoneNumber)
-        }
-      } catch (error) {
-        console.error('Connection monitoring error:', error)
-      }
-    }, 3000) // Check every 3 seconds
-
-    // Stop monitoring after 2 minutes (code expires)
-    setTimeout(() => {
-      this.stopConnectionMonitoring()
-    }, 120000)
+  if (this.connectionCheckInterval) {
+    clearInterval(this.connectionCheckInterval)
   }
+
+  let checkCount = 0
+  const maxChecks = 40 // 200 seconds total
+
+  this.connectionCheckInterval = setInterval(async () => {
+    if (!this.currentSessionId) return
+    checkCount++
+
+    try {
+      const response = await fetch(`/api/connection-status/${this.currentSessionId}`)
+      const result = await response.json()
+
+      console.log(`Connection check ${checkCount}:`, result)
+
+      if (response.ok && result.isConnected) {
+        // Connection successful!
+        this.stopConnectionMonitoring()
+        this.showConnectionSuccess(result.phoneNumber)
+      } else if (checkCount >= maxChecks) {
+        // Timeout after max checks
+        this.stopConnectionMonitoring()
+        const connectionStatus = document.getElementById('connectionStatus')
+        connectionStatus.innerHTML = '<p style="color: red;">❌ Connection timeout. Please try again.</p>'
+      } else {
+        // Update status
+        const connectionStatus = document.getElementById('connectionStatus')
+        connectionStatus.innerHTML = `<p>Waiting for connection... (${checkCount}/${maxChecks})</p><div class="spinner small"></div>`
+      }
+    } catch (error) {
+      console.error('Connection monitoring error:', error)
+    }
+  }, 5000) // Check every 5 seconds
+
+  // Stop monitoring after 220 seconds (slightly longer than max checks)
+  setTimeout(() => {
+    this.stopConnectionMonitoring()
+  }, 220000)
+}
 
   stopConnectionMonitoring() {
     if (this.connectionCheckInterval) {
