@@ -1,7 +1,7 @@
 // Render Session Storage - Web-focused, lightweight storage
 import { MongoClient } from 'mongodb'
 import bcrypt from 'bcryptjs'
-import { createComponentLogger } from './utils/logger.js'
+import { createComponentLogger } from './logger.js'
 
 const logger = createComponentLogger('RENDER_STORAGE')
 
