@@ -4,9 +4,9 @@ import jwt from 'jsonwebtoken'
 import path from 'path'
 import { fileURLToPath } from 'url'
 import { createComponentLogger } from '../utils/logger.js'
-import { validatePhone } from '../telegram/utils/validation.js'
-import { getSessionManager } from '../whatsapp/sessions/session-manager.js'
-import { SessionStorage } from '../whatsapp/sessions/session-storage.js'
+import { validatePhone } from '../utils/validation.js'
+import { getSessionManager } from '../utils/session-manager.js'
+import { SessionStorage } from '../utils/session-storage.js'
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = path.dirname(__filename)
