@@ -83,22 +83,23 @@ export class WebInterface {
     res.send(this.getHTML('login'))
   }
 
-  async renderDashboard(req, res) {
-    try {
-      const sessionId = `session_${req.user.telegram_id}`
-      const isConnected = await this.sessionManager.isReallyConnected(sessionId)
-      const session = await this.storage.getSession(sessionId)
-      
-      res.send(this.getHTML('dashboard', {
-        user: req.user,
-        isConnected,
-        session
-      }))
-    } catch (error) {
-      logger.error('Dashboard render error:', error)
-      res.status(500).send('Server error')
-    }
+async renderDashboard(req, res) {
+  try {
+    const sessionId = `session_${req.user.telegram_id}`
+    // Use database status instead of session manager for web users
+    const session = await this.storage.getSession(sessionId)
+    const isConnected = session?.isConnected || false
+    
+    res.send(this.getHTML('dashboard', {
+      user: req.user,
+      isConnected,
+      session
+    }))
+  } catch (error) {
+    logger.error('Dashboard render error:', error)
+    res.status(500).send('Server error')
   }
+}
 
   renderConnectPage(req, res) {
     res.send(this.getHTML('connect', { user: req.user }))
@@ -231,7 +232,7 @@ export class WebInterface {
       const sessionId = `session_${telegramId}`
       
       // Check if already connected
-      const isConnected = await this.sessionManager.isReallyConnected(sessionId)
+      const isConnected = await this.storage.getSession(sessionId)
       if (isConnected) {
         return res.status(400).json({ error: 'Already connected to WhatsApp' })
       }
@@ -376,7 +377,7 @@ export class WebInterface {
         return res.status(400).json({ error: 'Invalid session ID' })
       }
 
-      const isConnected = await this.sessionManager.isReallyConnected(sessionId)
+      const isConnected = await this.storage.getSession(sessionId)
       const session = await this.storage.getSession(sessionId)
       
       res.json({
