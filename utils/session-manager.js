@@ -204,16 +204,22 @@ class WhatsAppSessionManager {
   }
 
   _removeExistingConnectionListener(sock, sessionId) {
-    if (this.connectionListeners.has(sessionId)) {
-      const existingHandler = this.connectionListeners.get(sessionId)
-      try {
+  if (this.connectionListeners.has(sessionId)) {
+    const existingHandler = this.connectionListeners.get(sessionId)
+    try {
+      // Check if sock.ev exists and has removeListener method
+      if (sock.ev && typeof sock.ev.removeListener === 'function') {
         sock.ev.removeListener('connection.update', existingHandler)
-        this.connectionListeners.delete(sessionId)
-      } catch (e) {
-        logger.warn(`Failed to remove existing connection listener for ${sessionId}: ${e.message}`)
+      } else if (sock.ev && typeof sock.ev.off === 'function') {
+        sock.ev.off('connection.update', existingHandler)
       }
+      this.connectionListeners.delete(sessionId)
+    } catch (e) {
+      // Silent continue - just delete from map
+      this.connectionListeners.delete(sessionId)
     }
   }
+}
 
   async _handleConnectionUpdate(sessionId, update, callbacks) {
     const { connection, lastDisconnect, qr } = update

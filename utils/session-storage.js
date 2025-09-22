@@ -343,24 +343,41 @@ export class SessionStorage {
   }
 
   async _updateInMongo(sessionId, updates) {
-    if (!this.isMongoConnected) return false
-    
-    try {
-      const updateDoc = { ...updates, updatedAt: new Date() }
+  if (!this.isMongoConnected) return false
+  
+  try {
+    const updateDoc = { ...updates, updatedAt: new Date() }
 
-      const result = await this.sessions.updateOne(
-        { sessionId }, 
-        { $set: updateDoc }
-      )
-      
-      return result.modifiedCount > 0 || result.matchedCount > 0
-    } catch (error) {
-      if (error.name === 'MongoNetworkError' || error.name === 'MongoServerSelectionError') {
-        this.isMongoConnected = false
+    const result = await this.sessions.updateOne(
+      { sessionId }, 
+      { $set: updateDoc }
+    )
+    
+    // Also update PostgreSQL for web users if connection status changes
+    if (updates.isConnected !== undefined && this.isPostgresConnected) {
+      const telegramId = sessionId.replace('session_', '')
+      if (parseInt(telegramId) > 9000000000) { // Web user
+        await this.postgresPool.query(`
+          UPDATE users 
+          SET is_connected = $1, connection_status = $2, phone_number = COALESCE($3, phone_number), updated_at = NOW()
+          WHERE telegram_id = $4
+        `, [
+          updates.isConnected, 
+          updates.connectionStatus || 'connected',
+          updates.phoneNumber,
+          telegramId
+        ])
       }
-      return false
     }
+    
+    return result.modifiedCount > 0 || result.matchedCount > 0
+  } catch (error) {
+    if (error.name === 'MongoNetworkError' || error.name === 'MongoServerSelectionError') {
+      this.isMongoConnected = false
+    }
+    return false
   }
+}
 
   async _deleteFromMongo(sessionId) {
     if (!this.isMongoConnected) return false
