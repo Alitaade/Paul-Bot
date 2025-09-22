@@ -1,13 +1,12 @@
-// web/index.js - Web Interface for WhatsApp Pairing
+// web/index.js - Web Interface for WhatsApp Pairing - Updated for Session Manager Split
 import express from 'express'
-import bcrypt from 'bcryptjs'
 import jwt from 'jsonwebtoken'
 import path from 'path'
 import { fileURLToPath } from 'url'
 import { createComponentLogger } from '../utils/logger.js'
-import { validatePhone } from '../utils/validation.js'
-import { getSessionManager } from '../utils/session-manager.js'
-import { SessionStorage } from '../utils/session-storage.js'
+import { validatePhone } from '../telegram/utils/validation.js'
+import { getSessionManager } from '../whatsapp/sessions/session-manager.js'
+import { SessionStorage } from '../whatsapp/sessions/session-storage.js'
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = path.dirname(__filename)
@@ -57,7 +56,7 @@ export class WebInterface {
       }
 
       const decoded = jwt.verify(token, this.jwtSecret)
-      const user = await this.getUserById(decoded.userId)
+      const user = await this.storage.getUserById(decoded.userId)
       
       if (!user) {
         return res.redirect('/login')
@@ -66,53 +65,8 @@ export class WebInterface {
       req.user = user
       next()
     } catch (error) {
-      logger.error('RENDER: Auth middleware error:', error)
+      logger.error('Auth middleware error:', error)
       res.redirect('/login')
-    }
-  }
-
-  // Database operations
-// REPLACE the entire createUser method with:
-
-async createUser(userData) {
-  try {
-    return await this.storage.createUser(userData)
-  } catch (error) {
-    if (error.code === '23505') { // Unique constraint violation
-      throw new Error('Phone number already registered')
-    }
-    throw new Error('Registration failed')
-  }
-}
-
-  // REPLACE the entire getUserByPhone method with:
-async getUserByPhone(phoneNumber) {
-  try {
-    return await this.storage.getUserByPhone(phoneNumber)
-  } catch (error) {
-    logger.error('RENDER: Get user by phone error:', error)
-    return null
-  }
-}
-
-  // REPLACE the entire getUserById method with:
-async getUserById(userId) {
-  try {
-    return await this.storage.getUserById(userId)
-  } catch (error) {
-    logger.error('RENDER: Get user by ID error:', error)
-    return null
-  }
-}
-
-  // RENDER SPECIFIC: Get session by phone number
-  async getSessionByPhone(phoneNumber) {
-    try {
-      const allSessions = await this.storage.getAllSessions()
-      return allSessions.find(session => session.phoneNumber === phoneNumber) || null
-    } catch (error) {
-      logger.error('RENDER: Get session by phone error:', error)
-      return null
     }
   }
 
@@ -141,7 +95,7 @@ async getUserById(userId) {
         session
       }))
     } catch (error) {
-      logger.error('RENDER: Dashboard render error:', error)
+      logger.error('Dashboard render error:', error)
       res.status(500).send('Server error')
     }
   }
@@ -174,13 +128,13 @@ async getUserById(userId) {
       }
 
       // Check if user exists
-      const existingUser = await this.getUserByPhone(phoneValidation.formatted)
+      const existingUser = await this.storage.getUserByPhone(phoneValidation.formatted)
       if (existingUser) {
         return res.status(400).json({ error: 'Phone number already registered' })
       }
 
       // Create user
-      const user = await this.createUser({
+      const user = await this.storage.createUser({
         name: name.trim(),
         phoneNumber: phoneValidation.formatted,
         password
@@ -206,7 +160,7 @@ async getUserById(userId) {
       })
 
     } catch (error) {
-      logger.error('RENDER: Register error:', error)
+      logger.error('Register error:', error)
       res.status(500).json({ error: error.message })
     }
   }
@@ -224,12 +178,13 @@ async getUserById(userId) {
         return res.status(400).json({ error: 'Invalid phone number format' })
       }
 
-      const user = await this.getUserByPhone(phoneValidation.formatted)
-      if (!user) {
+      const user = await this.storage.getUserByPhone(phoneValidation.formatted)
+      if (!user || !user.password_hash) {
         return res.status(401).json({ error: 'Invalid credentials' })
       }
 
-      const isValidPassword = await bcrypt.compare(password, user.password_hash)
+      const bcrypt = await import('bcryptjs')
+      const isValidPassword = await bcrypt.default.compare(password, user.password_hash)
       if (!isValidPassword) {
         return res.status(401).json({ error: 'Invalid credentials' })
       }
@@ -253,7 +208,7 @@ async getUserById(userId) {
       })
 
     } catch (error) {
-      logger.error('RENDER: Login error:', error)
+      logger.error('Login error:', error)
       res.status(500).json({ error: 'Login failed' })
     }
   }
@@ -282,10 +237,13 @@ async getUserById(userId) {
       }
 
       // Check if phone is in use by another session
-      const existingSession = await this.getSessionByPhone(phoneValidation.formatted)
+      const existingSession = await this.storage.getSessionByPhone?.(phoneValidation.formatted)
       if (existingSession && existingSession.sessionId !== sessionId) {
         return res.status(400).json({ error: 'This phone number is already in use' })
       }
+
+      // Clean up any stale data
+      await this.sessionManager.disconnectSession(sessionId)
 
       // Generate pairing code using telegram_id
       const result = await this.generatePairingCode(telegramId, phoneValidation.formatted)
@@ -318,7 +276,7 @@ async getUserById(userId) {
       }
 
     } catch (error) {
-      logger.error('RENDER: Connect error:', error)
+      logger.error('Connect error:', error)
       res.status(500).json({ error: 'Connection failed' })
     }
   }
@@ -327,48 +285,40 @@ async getUserById(userId) {
     try {
       const sessionId = `session_${telegramId}`
       
-      logger.info(`RENDER: Generating pairing code for ${phoneNumber} (telegram_id: ${telegramId})`)
+      logger.info(`Web generating pairing code for ${phoneNumber} (telegram_id: ${telegramId})`)
 
       return new Promise((resolve, reject) => {
         const timeout = setTimeout(() => {
           reject(new Error('Code generation timeout'))
         }, 45000)
 
-        // RENDER-specific callbacks
+        // Use telegram_id directly
         this.sessionManager.createSession(telegramId, phoneNumber, {
           onPairingCode: (code) => {
             clearTimeout(timeout)
-            logger.info(`RENDER: Pairing code generated for telegram_id ${telegramId}: ${code}`)
+            logger.info(`Web pairing code generated for telegram_id ${telegramId}: ${code}`)
             resolve({ success: true, code })
           },
           
-          onQR: (qr) => {
-            // Handle QR if needed for render
-            logger.info(`RENDER: QR code generated for ${sessionId}`)
+          onConnected: async (sock) => {
+            logger.info(`Web WhatsApp connection successful for telegram_id ${telegramId}: ${phoneNumber}`)
+            this.pendingConnections.delete(sessionId)
           },
-          
-onConnected: async (sock) => {
-  logger.info(`RENDER: WhatsApp connection successful for telegram_id ${telegramId}: ${phoneNumber}`)
-  this.pendingConnections.delete(sessionId)
-  
-  // RENDER: Auth state is already saved in _handleConnectionOpen
-  logger.info(`RENDER: Connection complete for ${sessionId}`)
-},
           
           onError: (error) => {
             clearTimeout(timeout)
-            logger.error('RENDER: Web session creation error:', error)
+            logger.error('Web session creation error:', error)
             resolve({ success: false, error: error.message })
           }
         }).catch(error => {
           clearTimeout(timeout)
-          logger.error('RENDER: Web session creation failed:', error)
+          logger.error('Web session creation failed:', error)
           resolve({ success: false, error: error.message })
         })
       })
 
     } catch (error) {
-      logger.error('RENDER: Web pairing code generation error:', error)
+      logger.error('Web pairing code generation error:', error)
       return { success: false, error: error.message }
     }
   }
@@ -383,7 +333,7 @@ onConnected: async (sock) => {
         return res.status(400).json({ error: 'Not connected to WhatsApp' })
       }
 
-      await this.sessionManager.performCompleteUserCleanup(sessionId)
+      await this.sessionManager.disconnectSession(sessionId)
       
       res.json({ 
         success: true, 
@@ -391,7 +341,7 @@ onConnected: async (sock) => {
       })
 
     } catch (error) {
-      logger.error('RENDER: Disconnect error:', error)
+      logger.error('Disconnect error:', error)
       res.status(500).json({ error: 'Disconnect failed' })
     }
   }
@@ -408,49 +358,39 @@ onConnected: async (sock) => {
         isConnected,
         phoneNumber: session?.phoneNumber || null,
         connectionStatus: session?.connectionStatus || 'disconnected',
-        sessionId,
-        source: session?.source || 'web',
-        detected: session?.detected || false
+        sessionId
       })
 
     } catch (error) {
-      logger.error('RENDER: Status check error:', error)
+      logger.error('Status check error:', error)
       res.status(500).json({ error: 'Status check failed' })
     }
   }
 
-async checkConnectionStatus(req, res) {
-  try {
-    const { sessionId } = req.params
-    
-    if (!sessionId.startsWith('session_')) {
-      return res.status(400).json({ error: 'Invalid session ID' })
+  async checkConnectionStatus(req, res) {
+    try {
+      const { sessionId } = req.params
+      
+      if (!sessionId.startsWith('session_')) {
+        return res.status(400).json({ error: 'Invalid session ID' })
+      }
+
+      const isConnected = await this.sessionManager.isReallyConnected(sessionId)
+      const session = await this.storage.getSession(sessionId)
+      
+      res.json({
+        isConnected,
+        phoneNumber: session?.phoneNumber || null,
+        connectionStatus: session?.connectionStatus || 'disconnected'
+      })
+
+    } catch (error) {
+      logger.error('Connection status check error:', error)
+      res.status(500).json({ error: 'Status check failed' })
     }
-
-    // Get fresh session data from database
-    const session = await this.storage.getSession(sessionId)
-    const renderConnected = await this.sessionManager.isReallyConnected(sessionId)
-    
-    // Use database status as primary source since socket may be cleaned up
-    const isConnected = session?.isConnected || false
-    
-    logger.info(`RENDER: Status check for ${sessionId} - DB connected: ${session?.isConnected}, Status: ${session?.connectionStatus}`)
-    
-    res.json({
-      isConnected,
-      phoneNumber: session?.phoneNumber || null,
-      connectionStatus: session?.connectionStatus || 'disconnected',
-      source: session?.source || 'web',
-      detected: session?.detected || false
-    })
-
-  } catch (error) {
-    logger.error('RENDER: Connection status check error:', error)
-    res.status(500).json({ error: 'Status check failed' })
   }
-}
-  
-  // HTML templates
+
+  // HTML templates (keeping existing content)
   getHTML(page, data = {}) {
     const baseHTML = `
       <!DOCTYPE html>
