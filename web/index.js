@@ -347,25 +347,26 @@ export class WebInterface {
   }
 
   async handleStatus(req, res) {
-    try {
-      const telegramId = req.user.telegram_id
-      const sessionId = `session_${telegramId}`
-      
-      const isConnected = await this.sessionManager.isReallyConnected(sessionId)
-      const session = await this.storage.getSession(sessionId)
-      
-      res.json({
-        isConnected,
-        phoneNumber: session?.phoneNumber || null,
-        connectionStatus: session?.connectionStatus || 'disconnected',
-        sessionId
-      })
+  try {
+    const telegramId = req.user.telegram_id
+    const sessionId = `session_${telegramId}`
+    
+    // For web users, check database status directly since web hands over to pterodactyl
+    const session = await this.storage.getSession(sessionId)
+    const isConnected = session?.isConnected || false
+    
+    res.json({
+      isConnected,
+      phoneNumber: session?.phoneNumber || null,
+      connectionStatus: session?.connectionStatus || 'disconnected',
+      sessionId
+    })
 
-    } catch (error) {
-      logger.error('Status check error:', error)
-      res.status(500).json({ error: 'Status check failed' })
-    }
+  } catch (error) {
+    logger.error('Status check error:', error)
+    res.status(500).json({ error: 'Status check failed' })
   }
+}
 
   async checkConnectionStatus(req, res) {
     try {

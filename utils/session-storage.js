@@ -1,7 +1,7 @@
 import { MongoClient } from 'mongodb'
 import bcrypt from 'bcryptjs'
 import { logger } from './logger.js'
-
+//web session storage
 export class SessionStorage {
   constructor() {
     this.client = null
@@ -301,6 +301,8 @@ export class SessionStorage {
         isConnected: sessionData.isConnected || false,
         connectionStatus: sessionData.connectionStatus || 'disconnected',
         reconnectAttempts: sessionData.reconnectAttempts || 0,
+        source: sessionData.source || 'telegram',
+        detected: sessionData.detected !== false,
         createdAt: new Date(),
         updatedAt: new Date()
       }
@@ -331,6 +333,8 @@ export class SessionStorage {
         isConnected: session.isConnected,
         connectionStatus: session.connectionStatus,
         reconnectAttempts: session.reconnectAttempts,
+        source: session.source || 'telegram',
+        detected: session.detected !== false,
         createdAt: session.createdAt,
         updatedAt: session.updatedAt
       }
