@@ -182,27 +182,6 @@ export class SessionStorage {
     }
   }
 
-  async _deleteFromPostgres(sessionId) {
-  if (!this.isPostgresConnected) return false
-  
-  try {
-    const result = await this.postgresPool.query(`
-      UPDATE users 
-      SET session_id = NULL, 
-          is_connected = false, 
-          connection_status = 'disconnected',
-          session_data = NULL,
-          auth_state = NULL,
-          updated_at = NOW()
-      WHERE session_id = $1
-    `, [sessionId])
-    
-    return result.rowCount > 0
-  } catch (error) {
-    return false
-  }
-}
-
   async getSession(sessionId) {
     try {
       // Always fetch fresh data from database first

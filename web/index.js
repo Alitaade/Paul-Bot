@@ -1,4 +1,4 @@
-// web/index.js - Web Interface for WhatsApp Pairing - Updated for Session Manager Split
+// web/index.js - Web Interface for WhatsApp Pairing - Optimized
 import express from 'express'
 import jwt from 'jsonwebtoken'
 import path from 'path'
@@ -7,6 +7,7 @@ import { createComponentLogger } from '../utils/logger.js'
 import { validatePhone } from '../utils/validation.js'
 import { getSessionManager } from '../utils/session-manager.js'
 import { SessionStorage } from '../utils/session-storage.js'
+import { WebTemplates } from './templates/index.js'
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = path.dirname(__filename)
@@ -17,6 +18,7 @@ export class WebInterface {
     this.router = express.Router()
     this.storage = new SessionStorage()
     this.sessionManager = getSessionManager()
+    this.templates = new WebTemplates()
     this.pendingConnections = new Map()
     this.jwtSecret = process.env.JWT_SECRET || 'change-this-secret-in-production'
     
@@ -72,37 +74,36 @@ export class WebInterface {
 
   // Route handlers
   renderHomePage(req, res) {
-    res.send(this.getHTML('home'))
+    res.send(this.templates.renderHome())
   }
 
   renderRegisterPage(req, res) {
-    res.send(this.getHTML('register'))
+    res.send(this.templates.renderRegister())
   }
 
   renderLoginPage(req, res) {
-    res.send(this.getHTML('login'))
+    res.send(this.templates.renderLogin())
   }
 
-async renderDashboard(req, res) {
-  try {
-    const sessionId = `session_${req.user.telegram_id}`
-    // Use database status instead of session manager for web users
-    const session = await this.storage.getSession(sessionId)
-    const isConnected = session?.isConnected || false
-    
-    res.send(this.getHTML('dashboard', {
-      user: req.user,
-      isConnected,
-      session
-    }))
-  } catch (error) {
-    logger.error('Dashboard render error:', error)
-    res.status(500).send('Server error')
+  async renderDashboard(req, res) {
+    try {
+      const sessionId = `session_${req.user.telegram_id}`
+      const session = await this.storage.getSession(sessionId)
+      const isConnected = session?.isConnected || false
+      
+      res.send(this.templates.renderDashboard({
+        user: req.user,
+        isConnected,
+        session
+      }))
+    } catch (error) {
+      logger.error('Dashboard render error:', error)
+      res.status(500).send('Server error')
+    }
   }
-}
 
   renderConnectPage(req, res) {
-    res.send(this.getHTML('connect', { user: req.user }))
+    res.send(this.templates.renderConnect({ user: req.user }))
   }
 
   // API handlers
@@ -324,54 +325,54 @@ async renderDashboard(req, res) {
     }
   }
 
-async handleDisconnect(req, res) {
-  try {
-    const telegramId = req.user.telegram_id
-    const sessionId = `session_${telegramId}`
-    
-    const session = await this.storage.getSession(sessionId)
-    if (!session || !session.isConnected) {
-      return res.status(400).json({ error: 'Not connected to WhatsApp' })
+  async handleDisconnect(req, res) {
+    try {
+      const telegramId = req.user.telegram_id
+      const sessionId = `session_${telegramId}`
+      
+      const session = await this.storage.getSession(sessionId)
+      if (!session || !session.isConnected) {
+        return res.status(400).json({ error: 'Not connected to WhatsApp' })
+      }
+
+      // Disconnect from session manager first (clears sockets)
+      await this.sessionManager.disconnectSession(sessionId)
+      
+      // Perform web user disconnect (database cleanup)
+      await this.storage.performWebUserDisconnect(sessionId, telegramId)
+      
+      res.json({ 
+        success: true, 
+        message: 'Disconnected successfully' 
+      })
+
+    } catch (error) {
+      logger.error('Disconnect error:', error)
+      res.status(500).json({ error: 'Disconnect failed' })
     }
-
-    // Disconnect from session manager first (clears sockets)
-    await this.sessionManager.disconnectSession(sessionId)
-    
-    // Perform web user disconnect (database cleanup)
-    await this.storage.performWebUserDisconnect(sessionId, telegramId)
-    
-    res.json({ 
-      success: true, 
-      message: 'Disconnected successfully' 
-    })
-
-  } catch (error) {
-    logger.error('Disconnect error:', error)
-    res.status(500).json({ error: 'Disconnect failed' })
   }
-}
 
   async handleStatus(req, res) {
-  try {
-    const telegramId = req.user.telegram_id
-    const sessionId = `session_${telegramId}`
-    
-    // For web users, check database status directly since web hands over to pterodactyl
-    const session = await this.storage.getSession(sessionId)
-    const isConnected = session?.isConnected || false
-    
-    res.json({
-      isConnected,
-      phoneNumber: session?.phoneNumber || null,
-      connectionStatus: session?.connectionStatus || 'disconnected',
-      sessionId
-    })
+    try {
+      const telegramId = req.user.telegram_id
+      const sessionId = `session_${telegramId}`
+      
+      // For web users, check database status directly since web hands over to pterodactyl
+      const session = await this.storage.getSession(sessionId)
+      const isConnected = session?.isConnected || false
+      
+      res.json({
+        isConnected,
+        phoneNumber: session?.phoneNumber || null,
+        connectionStatus: session?.connectionStatus || 'disconnected',
+        sessionId
+      })
 
-  } catch (error) {
-    logger.error('Status check error:', error)
-    res.status(500).json({ error: 'Status check failed' })
+    } catch (error) {
+      logger.error('Status check error:', error)
+      res.status(500).json({ error: 'Status check failed' })
+    }
   }
-}
 
   async checkConnectionStatus(req, res) {
     try {
@@ -381,8 +382,8 @@ async handleDisconnect(req, res) {
         return res.status(400).json({ error: 'Invalid session ID' })
       }
 
-      const isConnected = await this.storage.getSession(sessionId)
       const session = await this.storage.getSession(sessionId)
+      const isConnected = session?.isConnected || false
       
       res.json({
         isConnected,
@@ -394,235 +395,5 @@ async handleDisconnect(req, res) {
       logger.error('Connection status check error:', error)
       res.status(500).json({ error: 'Status check failed' })
     }
-  }
-
-  // HTML templates (keeping existing content)
-  getHTML(page, data = {}) {
-    const baseHTML = `
-      <!DOCTYPE html>
-      <html lang="en">
-      <head>
-        <meta charset="UTF-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>Paul WhatsApp Web Pairing</title>
-        <link rel="stylesheet" href="/static/style.css">
-      </head>
-      <body>
-        ${this.getPageContent(page, data)}
-        <script src="/static/script.js"></script>
-      </body>
-      </html>
-    `
-    
-    return baseHTML
-  }
-
-  getPageContent(page, data) {
-    switch (page) {
-      case 'home':
-        return this.getHomeContent()
-      case 'register':
-        return this.getRegisterContent()
-      case 'login':
-        return this.getLoginContent()
-      case 'dashboard':
-        return this.getDashboardContent(data)
-      case 'connect':
-        return this.getConnectContent(data)
-      default:
-        return '<div class="container"><h1>Page Not Found</h1></div>'
-    }
-  }
-
-  getHomeContent() {
-    return `
-      <div class="container">
-        <div class="hero">
-          <h1>Paul WhatsApp Web Pairing</h1>
-          <p>Connect your WhatsApp account securely through our web interface</p>
-          <div class="hero-buttons">
-            <a href="/login" class="btn btn-primary">Login</a>
-            <a href="/register" class="btn btn-secondary">Register</a>
-          </div>
-        </div>
-        
-        <div class="features">
-          <div class="feature-card">
-            <h3>🔒 Secure Connection</h3>
-            <p>Your WhatsApp data is encrypted and secure</p>
-          </div>
-          <div class="feature-card">
-            <h3>🌐 Web Access</h3>
-            <p>Access WhatsApp from any web browser</p>
-          </div>
-          <div class="feature-card">
-            <h3>📱 Easy Pairing</h3>
-            <p>Simple pairing process with QR code</p>
-          </div>
-        </div>
-      </div>
-    `
-  }
-
-  getRegisterContent() {
-    return `
-      <div class="container">
-        <div class="auth-form">
-          <h2>Create Account</h2>
-          <form id="registerForm">
-            <div class="form-group">
-              <label for="name">Full Name</label>
-              <input type="text" id="name" name="name" required>
-            </div>
-            
-            <div class="form-group">
-              <label for="phoneNumber">Phone Number</label>
-              <input type="tel" id="phoneNumber" name="phoneNumber" placeholder="+234xxxxxxxxxx" required>
-              <small>Include country code (e.g., +234 for Nigeria)</small>
-            </div>
-            
-            <div class="form-group">
-              <label for="password">Password</label>
-              <div class="password-input">
-                <input type="password" id="password" name="password" required>
-                <button type="button" class="toggle-password" data-target="password">👁️</button>
-              </div>
-            </div>
-            
-            <div class="form-group">
-              <label for="confirmPassword">Confirm Password</label>
-              <div class="password-input">
-                <input type="password" id="confirmPassword" name="confirmPassword" required>
-                <button type="button" class="toggle-password" data-target="confirmPassword">👁️</button>
-              </div>
-            </div>
-            
-            <button type="submit" class="btn btn-primary full-width">Register</button>
-          </form>
-          
-          <p class="auth-link">
-            Already have an account? <a href="/login">Login here</a>
-          </p>
-        </div>
-      </div>
-    `
-  }
-
-  getLoginContent() {
-    return `
-      <div class="container">
-        <div class="auth-form">
-          <h2>Login</h2>
-          <form id="loginForm">
-            <div class="form-group">
-              <label for="phoneNumber">Phone Number</label>
-              <input type="tel" id="phoneNumber" name="phoneNumber" placeholder="+234xxxxxxxxxx" required>
-            </div>
-            
-            <div class="form-group">
-              <label for="password">Password</label>
-              <div class="password-input">
-                <input type="password" id="password" name="password" required>
-                <button type="button" class="toggle-password" data-target="password">👁️</button>
-              </div>
-            </div>
-            
-            <button type="submit" class="btn btn-primary full-width">Login</button>
-          </form>
-          
-          <p class="auth-link">
-            Don't have an account? <a href="/register">Register here</a>
-          </p>
-        </div>
-      </div>
-    `
-  }
-
-  getDashboardContent(data) {
-    const { user, isConnected, session } = data
-    
-    return `
-      <div class="container">
-        <div class="dashboard-header">
-          <h1>Welcome, ${user.name}</h1>
-          <p>Phone: ${user.phone_number}</p>
-        </div>
-        
-        <div class="status-card ${isConnected ? 'connected' : 'disconnected'}">
-          <h3>WhatsApp Status</h3>
-          <div class="status-indicator">
-            <span class="status-dot ${isConnected ? 'connected' : 'disconnected'}"></span>
-            <span class="status-text">${isConnected ? 'Connected' : 'Not Connected'}</span>
-          </div>
-          
-          ${isConnected ? `
-            <p>Connected to: ${session?.phoneNumber || 'Unknown'}</p>
-            <button id="disconnectBtn" class="btn btn-danger">Disconnect</button>
-          ` : `
-            <p>Connect your WhatsApp account to get started</p>
-            <a href="/connect" class="btn btn-primary">Connect WhatsApp</a>
-          `}
-        </div>
-        
-        <div class="actions">
-          <button id="refreshStatus" class="btn btn-secondary">Refresh Status</button>
-          <button id="logoutBtn" class="btn btn-outline">Logout</button>
-        </div>
-      </div>
-    `
-  }
-
-  getConnectContent(data) {
-    const { user } = data
-    
-    return `
-      <div class="container">
-        <div class="connect-form">
-          <h2>Connect WhatsApp</h2>
-          <p>Enter your WhatsApp phone number to generate a pairing code</p>
-          
-          <form id="connectForm">
-            <div class="form-group">
-              <label for="phoneNumber">WhatsApp Phone Number</label>
-              <input type="tel" id="phoneNumber" name="phoneNumber" 
-                     placeholder="+234xxxxxxxxxx" 
-                     value="${user.phone_number}" required>
-              <small>This should be your WhatsApp phone number</small>
-            </div>
-            
-            <button type="submit" class="btn btn-primary full-width">Generate Pairing Code</button>
-          </form>
-          
-          <div id="loadingSection" class="loading-section hidden">
-            <div class="spinner"></div>
-            <p>Generating pairing code...</p>
-          </div>
-          
-          <div id="codeSection" class="code-section hidden">
-            <h3>Pairing Code Generated</h3>
-            <div class="pairing-code" id="pairingCode">Loading...</div>
-            <button id="copyCodeBtn" class="btn btn-secondary">Copy Code</button>
-            
-            <div class="instructions">
-              <h4>How to connect:</h4>
-              <ol>
-                <li>Open WhatsApp on your phone</li>
-                <li>Go to Settings > Linked Devices</li>
-                <li>Tap "Link a Device"</li>
-                <li>Tap "Link with phone number instead"</li>
-                <li>Enter the pairing code above</li>
-              </ol>
-            </div>
-            
-            <div id="connectionStatus" class="connection-status">
-              <p>Waiting for connection...</p>
-              <div class="spinner small"></div>
-            </div>
-          </div>
-          
-          <a href="/dashboard" class="btn btn-outline">Back to Dashboard</a>
-        </div>
-      </div>
-    `
   }
 }

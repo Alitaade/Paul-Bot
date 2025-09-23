@@ -96,17 +96,7 @@ class WhatsAppSessionManager {
       
       const sock = makeWASocket({
         auth: state,
-        ...baileysConfig,
-        printQRInTerminal: false,
-        qrTimeout: 0,
-        // Web-specific config
-        shouldSyncHistoryMessage: () => false, // Disable for web to save resources
-        shouldIgnoreJid: () => false,
-        markOnlineOnConnect: true, // Mark online for web users
-        syncFullHistory: false,
-        defaultQueryTimeoutMs: 45_000,
-        generateHighQualityLinkPreview: false,
-        patchMessageBeforeSending: (message) => message
+        ...baileysConfig
       })
 
       // Set socket properties
@@ -150,7 +140,6 @@ class WhatsAppSessionManager {
     sock.authMethod = authMethod
     sock.isRegistered = isRegistered
     sock.sessionId = sessionId
-    sock.eventHandlersSetup = false // Web doesn't setup event handlers
   }
 
   async _getAuthState(sessionId) {
@@ -227,9 +216,6 @@ class WhatsAppSessionManager {
     const sock = this.activeSockets.get(sessionId)
 
     try {
-      if (qr && callbacks?.onQR) {
-        callbacks.onQR(qr)
-      }
 
       if (connection === 'open') {
         await this._handleConnectionOpen(sock, sessionId, userId, callbacks)
