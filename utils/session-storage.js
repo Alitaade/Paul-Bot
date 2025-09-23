@@ -290,33 +290,33 @@ export class SessionStorage {
   // MONGODB OPERATIONS
   // ==========================================
 
-  async _saveToMongo(sessionId, sessionData) {
-    if (!this.isMongoConnected) return false
-    
-    try {
-      const document = {
-        sessionId,
-        telegramId: sessionData.telegramId || sessionData.userId,
-        phoneNumber: sessionData.phoneNumber,
-        isConnected: sessionData.isConnected || false,
-        connectionStatus: sessionData.connectionStatus || 'disconnected',
-        reconnectAttempts: sessionData.reconnectAttempts || 0,
-        source: sessionData.source || 'telegram',
-        detected: sessionData.detected !== false,
-        createdAt: new Date(),
-        updatedAt: new Date()
-      }
-
-      await this.sessions.replaceOne({ sessionId }, document, { upsert: true })
-      return true
-    } catch (error) {
-      if (error.name === 'MongoNetworkError' || error.name === 'MongoServerSelectionError') {
-        this.isMongoConnected = false
-      }
-      logger.error('MongoDB save error:', error)
-      return false
+async _saveToMongo(sessionId, sessionData) {
+  if (!this.isMongoConnected) return false
+  
+  try {
+    const document = {
+      sessionId,
+      telegramId: sessionData.telegramId || sessionData.userId,
+      phoneNumber: sessionData.phoneNumber,
+      isConnected: sessionData.isConnected !== undefined ? sessionData.isConnected : false,
+      connectionStatus: sessionData.connectionStatus || 'disconnected',
+      reconnectAttempts: sessionData.reconnectAttempts || 0,
+      source: sessionData.source || 'web',  // Default to 'web' for web sessions
+      detected: sessionData.detected !== false, // Default to true unless explicitly false
+      createdAt: new Date(),
+      updatedAt: new Date()
     }
+
+    await this.sessions.replaceOne({ sessionId }, document, { upsert: true })
+    return true
+  } catch (error) {
+    if (error.name === 'MongoNetworkError' || error.name === 'MongoServerSelectionError') {
+      this.isMongoConnected = false
+    }
+    logger.error('MongoDB save error:', error)
+    return false
   }
+}
 
   async performWebUserDisconnect(sessionId, telegramId) {
   try {
@@ -370,33 +370,7 @@ export class SessionStorage {
   }
 }
 
-  async _getFromMongo(sessionId) {
-    if (!this.isMongoConnected) return null
-    
-    try {
-      const session = await this.sessions.findOne({ sessionId })
-      if (!session) return null
-
-      return {
-        sessionId: session.sessionId,
-        userId: session.telegramId,
-        telegramId: session.telegramId,
-        phoneNumber: session.phoneNumber,
-        isConnected: session.isConnected,
-        connectionStatus: session.connectionStatus,
-        reconnectAttempts: session.reconnectAttempts,
-        source: session.source || 'telegram',
-        detected: session.detected !== false,
-        createdAt: session.createdAt,
-        updatedAt: session.updatedAt
-      }
-    } catch (error) {
-      if (error.name === 'MongoNetworkError' || error.name === 'MongoServerSelectionError') {
-        this.isMongoConnected = false
-      }
-      return null
-    }
-  }
+_getFromMongo
 
   async _updateInMongo(sessionId, updates) {
   if (!this.isMongoConnected) return false

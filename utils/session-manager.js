@@ -63,72 +63,74 @@ class WhatsAppSessionManager {
   // ==========================================
 
   async createSession(userId, phoneNumber = null, callbacks = {}, isReconnect = false) {
-    const userIdStr = String(userId)
-    const sessionId = userIdStr.startsWith('session_') ? userIdStr : `session_${userIdStr}`
-    
-    // Prevent duplicate initialization
-    if (this.initializingSessions.has(sessionId)) {
-      logger.debug(`Session ${sessionId} already initializing`)
-      return this.activeSockets.get(sessionId)
-    }
-    
-    if (this.activeSockets.has(sessionId) && !isReconnect) {
-      logger.debug(`Session ${sessionId} already exists`)
-      return this.activeSockets.get(sessionId)
-    }
-
-    if (this.activeSockets.size >= this.maxSessions) {
-      throw new Error(`Maximum sessions limit (${this.maxSessions}) reached`)
-    }
-
-    this.initializingSessions.add(sessionId)
-    
-    try {
-      // Clean up existing session if this is a reconnect
-      if (isReconnect) {
-        await this._cleanupExistingSession(sessionId)
-      }
-      
-      await this.waitForMongoDB()
-      
-      const { state, saveCreds, authMethod } = await this._getAuthState(sessionId)
-      const isRegistered = state?.creds?.registered || false
-      
-      const sock = makeWASocket({
-        auth: state,
-        ...baileysConfig
-      })
-
-      // Set socket properties
-      this._configureSocket(sock, sessionId, authMethod, isRegistered, saveCreds)
-      this.activeSockets.set(sessionId, sock)
-      
-      // Setup connection handler
-      this._setupConnectionHandler(sock, sessionId, callbacks)
-
-      // Save session to storage - minimal data for web
-      await this.storage.saveSession(sessionId, {
-        userId: userIdStr,
-        telegramId: userIdStr,
-        phoneNumber,
-        isConnected: false,
-        connectionStatus: 'connecting',
-        reconnectAttempts: 0
-      })
-
-      // Handle pairing for new unregistered sessions
-      if (phoneNumber && !isRegistered && !isReconnect) {
-        setTimeout(() => this._handlePairing(sock, sessionId, phoneNumber, callbacks), 2000)
-      }
-
-      return sock
-    } catch (error) {
-      logger.error(`Failed to create session ${sessionId}:`, error)
-      throw error
-    } finally {
-      this.initializingSessions.delete(sessionId)
-    }
+  const userIdStr = String(userId)
+  const sessionId = userIdStr.startsWith('session_') ? userIdStr : `session_${userIdStr}`
+  
+  // Prevent duplicate initialization
+  if (this.initializingSessions.has(sessionId)) {
+    logger.debug(`Session ${sessionId} already initializing`)
+    return this.activeSockets.get(sessionId)
   }
+  
+  if (this.activeSockets.has(sessionId) && !isReconnect) {
+    logger.debug(`Session ${sessionId} already exists`)
+    return this.activeSockets.get(sessionId)
+  }
+
+  if (this.activeSockets.size >= this.maxSessions) {
+    throw new Error(`Maximum sessions limit (${this.maxSessions}) reached`)
+  }
+
+  this.initializingSessions.add(sessionId)
+  
+  try {
+    // Clean up existing session if this is a reconnect
+    if (isReconnect) {
+      await this._cleanupExistingSession(sessionId)
+    }
+    
+    await this.waitForMongoDB()
+    
+    const { state, saveCreds, authMethod } = await this._getAuthState(sessionId)
+    const isRegistered = state?.creds?.registered || false
+    
+    const sock = makeWASocket({
+      auth: state,
+      ...baileysConfig
+    })
+
+    // Set socket properties
+    this._configureSocket(sock, sessionId, authMethod, isRegistered, saveCreds)
+    this.activeSockets.set(sessionId, sock)
+    
+    // Setup connection handler
+    this._setupConnectionHandler(sock, sessionId, callbacks)
+
+    // Save session to storage - WITH SOURCE SET TO 'WEB'
+    await this.storage.saveSession(sessionId, {
+      userId: userIdStr,
+      telegramId: userIdStr,
+      phoneNumber,
+      isConnected: false,
+      connectionStatus: 'connecting',
+      reconnectAttempts: 0,
+      source: 'web',  // Explicitly set source to 'web'
+      detected: false // Web sessions start undetected until pterodactyl picks them up
+    })
+
+    // Handle pairing for new unregistered sessions
+    if (phoneNumber && !isRegistered && !isReconnect) {
+      setTimeout(() => this._handlePairing(sock, sessionId, phoneNumber, callbacks), 2000)
+    }
+
+    return sock
+  } catch (error) {
+    logger.error(`Failed to create session ${sessionId}:`, error)
+    throw error
+  } finally {
+    this.initializingSessions.delete(sessionId)
+  }
+}
 
   _configureSocket(sock, sessionId, authMethod, isRegistered, saveCreds) {
     // Increase max listeners to prevent memory leak warnings
@@ -239,12 +241,14 @@ class WhatsAppSessionManager {
     
     const phoneNumber = sock?.user?.id?.split('@')[0]
     
-    await this.storage.updateSession(sessionId, {
-      isConnected: true,
-      phoneNumber: phoneNumber ? `+${phoneNumber}` : null,
-      connectionStatus: 'connected',
-      reconnectAttempts: 0
-    })
+  await this.storage.updateSession(sessionId, {
+    isConnected: true,
+    phoneNumber: phoneNumber ? `+${phoneNumber}` : null,
+    connectionStatus: 'connected',
+    reconnectAttempts: 0,
+    source: 'web',  // Ensure source remains 'web'
+    detected: false // Keep as undetected for pterodactyl to pick up
+  })
 
     logger.info(`✓ Web ${sessionId} connected (+${phoneNumber || 'unknown'})`)
 
