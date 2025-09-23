@@ -324,28 +324,32 @@ async renderDashboard(req, res) {
     }
   }
 
-  async handleDisconnect(req, res) {
-    try {
-      const telegramId = req.user.telegram_id
-      const sessionId = `session_${telegramId}`
-      
-      const session = await this.storage.getSession(sessionId)
-      if (!session || !session.isConnected) {
-        return res.status(400).json({ error: 'Not connected to WhatsApp' })
-      }
-
-      await this.sessionManager.disconnectSession(sessionId)
-      
-      res.json({ 
-        success: true, 
-        message: 'Disconnected successfully' 
-      })
-
-    } catch (error) {
-      logger.error('Disconnect error:', error)
-      res.status(500).json({ error: 'Disconnect failed' })
+async handleDisconnect(req, res) {
+  try {
+    const telegramId = req.user.telegram_id
+    const sessionId = `session_${telegramId}`
+    
+    const session = await this.storage.getSession(sessionId)
+    if (!session || !session.isConnected) {
+      return res.status(400).json({ error: 'Not connected to WhatsApp' })
     }
+
+    // Disconnect from session manager first (clears sockets)
+    await this.sessionManager.disconnectSession(sessionId)
+    
+    // Perform web user disconnect (database cleanup)
+    await this.storage.performWebUserDisconnect(sessionId, telegramId)
+    
+    res.json({ 
+      success: true, 
+      message: 'Disconnected successfully' 
+    })
+
+  } catch (error) {
+    logger.error('Disconnect error:', error)
+    res.status(500).json({ error: 'Disconnect failed' })
   }
+}
 
   async handleStatus(req, res) {
   try {

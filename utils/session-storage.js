@@ -182,6 +182,27 @@ export class SessionStorage {
     }
   }
 
+  async _deleteFromPostgres(sessionId) {
+  if (!this.isPostgresConnected) return false
+  
+  try {
+    const result = await this.postgresPool.query(`
+      UPDATE users 
+      SET session_id = NULL, 
+          is_connected = false, 
+          connection_status = 'disconnected',
+          session_data = NULL,
+          auth_state = NULL,
+          updated_at = NOW()
+      WHERE session_id = $1
+    `, [sessionId])
+    
+    return result.rowCount > 0
+  } catch (error) {
+    return false
+  }
+}
+
   async getSession(sessionId) {
     try {
       // Always fetch fresh data from database first
@@ -317,6 +338,58 @@ export class SessionStorage {
       return false
     }
   }
+
+  async performWebUserDisconnect(sessionId, telegramId) {
+  try {
+    const results = { mongo: false, postgres: false, auth: false }
+    
+    // 1. Remove from MongoDB sessions collection
+    if (this.isMongoConnected) {
+      const deleteResult = await this.sessions.deleteOne({ sessionId })
+      results.mongo = deleteResult.deletedCount > 0
+    }
+    
+    // 2. Update PostgreSQL users table - clear session fields but keep user
+    if (this.isPostgresConnected) {
+      const pgResult = await this.postgresPool.query(`
+        UPDATE users 
+        SET session_id = NULL,
+            is_connected = false,
+            connection_status = 'disconnected',
+            reconnect_attempts = 0,
+            session_data = NULL,
+            auth_state = NULL,
+            updated_at = NOW()
+        WHERE telegram_id = $1
+      `, [telegramId])
+      results.postgres = pgResult.rowCount > 0
+    }
+    
+    // 3. Clean up auth_baileys collection in MongoDB
+    if (this.client) {
+      try {
+        const db = this.client.db()
+        const authCollection = db.collection('auth_baileys')
+        await authCollection.deleteMany({ 
+          $or: [
+            { _id: { $regex: `^${sessionId}` } },
+            { sessionId: sessionId }
+          ]
+        })
+        results.auth = true
+      } catch (error) {
+        // Auth cleanup is optional
+      }
+    }
+    
+    // Clear cache
+    this.sessionCache.delete(sessionId)
+    
+    return results
+  } catch (error) {
+    throw error
+  }
+}
 
   async _getFromMongo(sessionId) {
     if (!this.isMongoConnected) return null

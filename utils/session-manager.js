@@ -466,20 +466,23 @@ class WhatsAppSessionManager {
     return await this.storage.getSession(sessionId)
   }
 
-  async disconnectSession(sessionId) {
-    const sock = this.activeSockets.get(sessionId)
-    
-    if (sock) {
-      this._removeSocketListeners(sock, sessionId)
-      if (sock.ws && sock.ws.readyState === sock.ws.OPEN) {
-        sock.ws.close(1000, 'Web disconnect')
-      }
+async disconnectSession(sessionId) {
+  const sock = this.activeSockets.get(sessionId)
+  
+  if (sock) {
+    this._removeSocketListeners(sock, sessionId)
+    if (sock.ws && sock.ws.readyState === sock.ws.OPEN) {
+      sock.ws.close(1000, 'Web disconnect')
     }
-
-    this.activeSockets.delete(sessionId)
-    this.reconnectingSessions.delete(sessionId)
-    this.initializingSessions.delete(sessionId)
   }
+
+  this.activeSockets.delete(sessionId)
+  this.reconnectingSessions.delete(sessionId)
+  this.initializingSessions.delete(sessionId)
+  
+  // Note: Database cleanup is handled separately via storage.performWebUserDisconnect()
+  // This method only handles socket cleanup for web sessions
+}
 
   // ==========================================
   // CLEANUP & SHUTDOWN
