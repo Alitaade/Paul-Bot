@@ -80,7 +80,16 @@ app.get('/keep-alive', (req, res) => {
 app.get("/health", async (req, res) => {
   const uptime = Math.floor((Date.now() - startTime) / 1000)
   const memUsage = process.memoryUsage()
-  const poolStats = getPoolStats()
+  
+  let poolStats = { totalCount: 0, idleCount: 0, waitingCount: 0 }
+  let dbStatus = false
+  
+  try {
+    poolStats = getPoolStats()
+    dbStatus = await testConnectionOnce()
+  } catch (error) {
+    logger.debug('Health check database test failed:', error.message)
+  }
   
   const health = {
     status: "healthy",
@@ -98,7 +107,7 @@ app.get("/health", async (req, res) => {
       external: Math.round(memUsage.external / 1024 / 1024) + ' MB'
     },
     components: {
-      database: true,
+      database: dbStatus,
       webInterface: !!webInterface,
       poolStats: poolStats
     },
@@ -211,13 +220,15 @@ async function initializePlatform() {
   logger.info(`Memory limit: ${Math.round(process.memoryUsage().rss / 1024 / 1024)} MB initial`)
   
   try {
-    // 1. Database connection
-    logger.info("Connecting to database...")
+    // 1. Database connection (non-blocking)
+    logger.info("Testing database connection...")
     const dbConnected = await testConnection()
     if (!dbConnected) {
-      throw new Error('Database connection failed')
+      logger.warn('Database connection failed - web interface will work with limited functionality')
+      // Don't throw error, continue without database
+    } else {
+      logger.info("Database connection established")
     }
-    logger.info("Database connection established")
 
     // 2. Start HTTP Server
     server = app.listen(PORT, '0.0.0.0', () => {
