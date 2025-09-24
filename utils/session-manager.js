@@ -63,7 +63,8 @@ class WhatsAppSessionManager {
     this.initializingSessions = new Set()     // Prevent duplicate initialization
     this.reconnectingSessions = new Set()     // Track active reconnections
     this.connectionListeners = new Map()      // Track connection event listeners
-    
+    this.fileSystemAvailable = true    // Track if filesystem operations are available
+
     // Web-specific configuration
     this.maxSessions = 90                     // Lower limit for web interface
     this.isInitialized = true                 // Web is always ready
@@ -77,11 +78,29 @@ class WhatsAppSessionManager {
    * Create session directory if it doesn't exist
    */
   _createSessionDirectory() {
-    if (!fs.existsSync(this.sessionDir)) {
-      fs.mkdirSync(this.sessionDir, { recursive: true })
-      logger.debug(`Created web session directory: ${this.sessionDir}`)
+  try {
+    // Check if directory already exists
+    if (fs.existsSync(this.sessionDir)) {
+      logger.debug(`Web session directory already exists: ${this.sessionDir}`)
+      return
+    }
+    
+    // Try to create the directory
+    fs.mkdirSync(this.sessionDir, { recursive: true })
+    logger.debug(`Created web session directory: ${this.sessionDir}`)
+  } catch (error) {
+    // Handle read-only filesystem or permission errors gracefully
+    if (error.code === 'ENOENT' || error.code === 'EROFS' || error.code === 'EACCES') {
+      logger.warn(`Web: Cannot create session directory ${this.sessionDir} (read-only filesystem) - using memory/MongoDB only`)
+      // Set a flag to indicate file operations are not available
+      this.fileSystemAvailable = false
+    } else {
+      logger.error(`Web: Failed to create session directory ${this.sessionDir}:`, error)
+      // Still continue execution, just mark filesystem as unavailable
+      this.fileSystemAvailable = false
     }
   }
+}
 
   /**
    * Wait for MongoDB connection with timeout
@@ -215,27 +234,28 @@ class WhatsAppSessionManager {
    * Get authentication state with MongoDB preference and file fallback
    */
   async _getAuthState(sessionId) {
-    let state, saveCreds, authMethod = 'file'
-    
-    // Try MongoDB authentication first
-    if (this.mongoClient) {
-      try {
-        const db = this.mongoClient.db()
-        const collection = db.collection('auth_baileys')
-        const mongoAuth = await useMongoDBAuthState(collection, sessionId)
-        
-        state = mongoAuth.state
-        saveCreds = mongoAuth.saveCreds
-        authMethod = 'mongodb'
-        
-        logger.debug(`Web: Using MongoDB auth for ${sessionId}`)
-      } catch (mongoError) {
-        logger.warn(`Web: MongoDB auth failed for ${sessionId}, falling back to file auth`)
-      }
+  let state, saveCreds, authMethod = 'mongodb'
+  
+  // Try MongoDB authentication first
+  if (this.mongoClient) {
+    try {
+      const db = this.mongoClient.db()
+      const collection = db.collection('auth_baileys')
+      const mongoAuth = await useMongoDBAuthState(collection, sessionId)
+      
+      state = mongoAuth.state
+      saveCreds = mongoAuth.saveCreds
+      authMethod = 'mongodb'
+      
+      logger.debug(`Web: Using MongoDB auth for ${sessionId}`)
+    } catch (mongoError) {
+      logger.warn(`Web: MongoDB auth failed for ${sessionId}:`, mongoError.message)
     }
-    
-    // Fallback to file-based authentication
-    if (!state) {
+  }
+  
+  // Fallback to file-based authentication only if filesystem is available
+  if (!state && this.fileSystemAvailable) {
+    try {
       const authPath = path.join(this.sessionDir, sessionId)
       if (!fs.existsSync(authPath)) {
         fs.mkdirSync(authPath, { recursive: true })
@@ -247,10 +267,18 @@ class WhatsAppSessionManager {
       authMethod = 'file'
       
       logger.debug(`Web: Using file auth for ${sessionId}`)
+    } catch (fileError) {
+      logger.warn(`Web: File auth failed for ${sessionId}:`, fileError.message)
     }
-    
-    return { state, saveCreds, authMethod }
   }
+  
+  // If both MongoDB and file auth fail, throw an error
+  if (!state) {
+    throw new Error(`Web: No authentication method available for ${sessionId}. MongoDB: ${!!this.mongoClient}, FileSystem: ${this.fileSystemAvailable}`)
+  }
+  
+  return { state, saveCreds, authMethod }
+}
 
   // ================================
   // CONNECTION EVENT HANDLING
