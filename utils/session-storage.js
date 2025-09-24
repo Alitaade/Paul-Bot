@@ -179,9 +179,6 @@ export class SessionStorage {
       await client.query('SELECT 1 as test')
       client.release()
       
-      // Ensure web_users_auth table exists
-      await this._createWebAuthTable()
-      
       this.isPostgresConnected = true
       logger.info('PostgreSQL connection established for web interface')
       
@@ -191,30 +188,6 @@ export class SessionStorage {
     }
   }
 
-  /**
-   * Create web users authentication table if it doesn't exist
-   */
-  async _createWebAuthTable() {
-    try {
-      await this.postgresPool.query(`
-        CREATE TABLE IF NOT EXISTS web_users_auth (
-          user_id BIGINT PRIMARY KEY REFERENCES users(telegram_id) ON DELETE CASCADE,
-          password_hash VARCHAR(255) NOT NULL,
-          created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-          updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-      `)
-      
-      // Create index for faster lookups
-      await this.postgresPool.query(`
-        CREATE INDEX IF NOT EXISTS idx_web_users_auth_user_id ON web_users_auth(user_id)
-      `)
-      
-      logger.debug('Web authentication table verified')
-    } catch (error) {
-      logger.warn(`Web auth table creation failed: ${error.message}`)
-    }
-  }
 
   /**
    * Generate encryption key for sensitive data protection
