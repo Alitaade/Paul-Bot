@@ -271,172 +271,278 @@ export class WebTemplates {
     return this.getBaseHTML('Register', content, 'auth-page')
   }
 
-  renderDashboard(data) {
-    const { user, isConnected, session } = data
-    
-    const content = `
-      <div class="dashboard-container">
-        <div class="dashboard-header">
-          <div class="container">
-            <div class="header-content">
-              <div class="user-info">
-                <div class="user-avatar">
-                  ${user.name.charAt(0).toUpperCase()}
-                </div>
-                <div class="user-details">
-                  <h1 class="user-name">Welcome back, ${user.name}</h1>
-                  <p class="user-phone">${user.phone_number}</p>
-                </div>
+  // In templates/index.js - Add auto-refresh script to renderDashboard method
+renderDashboard(data) {
+  const { user, isConnected, session } = data
+  
+  const content = `
+    <div class="dashboard-container">
+      <div class="dashboard-header">
+        <div class="container">
+          <div class="header-content">
+            <div class="user-info">
+              <div class="user-avatar">
+                ${user.name.charAt(0).toUpperCase()}
               </div>
-              <div class="header-actions">
-                <button id="refreshStatus" class="btn btn-outline btn-small">
-                  <span class="btn-icon">🔄</span>
-                  Refresh
-                </button>
-                <button id="logoutBtn" class="btn btn-danger btn-small">
-                  <span class="btn-icon">🚪</span>
-                  Logout
-                </button>
+              <div class="user-details">
+                <h1 class="user-name">Welcome back, ${user.name}</h1>
+                <p class="user-phone">${user.phone_number}</p>
               </div>
+            </div>
+            <div class="header-actions">
+              <button id="refreshStatus" class="btn btn-outline btn-small">
+                <span class="btn-icon">🔄</span>
+                Refresh
+              </button>
+              <button id="logoutBtn" class="btn btn-danger btn-small">
+                <span class="btn-icon">🚪</span>
+                Logout
+              </button>
             </div>
           </div>
         </div>
+      </div>
 
-        <div class="dashboard-content">
-          <div class="container">
-            <div class="dashboard-grid">
-              <!-- Connection Status Card -->
-              <div class="status-card ${isConnected ? 'connected' : 'disconnected'}">
-                <div class="card-header">
-                  <h3>WhatsApp Connection</h3>
-                  <div class="status-indicator">
-                    <div class="status-dot ${isConnected ? 'connected' : 'disconnected'}"></div>
-                    <span class="status-text">${isConnected ? 'Connected' : 'Disconnected'}</span>
-                  </div>
+      <div class="dashboard-content">
+        <div class="container">
+          <div class="dashboard-grid">
+            <!-- Connection Status Card -->
+            <div id="statusCard" class="status-card ${isConnected ? 'connected' : 'disconnected'}">
+              <div class="card-header">
+                <h3>WhatsApp Connection</h3>
+                <div class="status-indicator">
+                  <div id="statusDot" class="status-dot ${isConnected ? 'connected' : 'disconnected'}"></div>
+                  <span id="statusText" class="status-text">${isConnected ? 'Connected' : 'Disconnected'}</span>
                 </div>
-                
-                <div class="card-body">
-                  ${isConnected ? `
-                    <div class="connection-info">
-                      <div class="info-item">
-                        <span class="info-label">Phone Number:</span>
-                        <span class="info-value">${session?.phoneNumber || 'N/A'}</span>
-                      </div>
-                      <div class="info-item">
-                        <span class="info-label">Status:</span>
-                        <span class="info-value success">Active</span>
-                      </div>
-                      <div class="info-item">
-                        <span class="info-label">Connection Time:</span>
-                        <span class="info-value" id="connectionTime">Just now</span>
-                      </div>
+              </div>
+              
+              <div id="cardBody" class="card-body">
+                ${isConnected ? `
+                  <div class="connection-info">
+                    <div class="info-item">
+                      <span class="info-label">Phone Number:</span>
+                      <span id="phoneInfo" class="info-value">${session?.phoneNumber || 'N/A'}</span>
                     </div>
-                    <button id="disconnectBtn" class="btn btn-danger full-width">
+                    <div class="info-item">
+                      <span class="info-label">Status:</span>
+                      <span class="info-value success">Active</span>
+                    </div>
+                    <div class="info-item">
+                      <span class="info-label">Connection Time:</span>
+                      <span class="info-value" id="connectionTime">Just now</span>
+                    </div>
+                  </div>
+                  <button id="disconnectBtn" class="btn btn-danger full-width">
+                    <span class="btn-loading hidden">
+                      <div class="spinner"></div>
+                      Disconnecting...
+                    </span>
+                    <span class="btn-text">
                       <span class="btn-icon">🔌</span>
                       Disconnect WhatsApp
-                    </button>
-                  ` : `
-                    <div class="no-connection">
-                      <div class="no-connection-icon">📱</div>
-                      <h4>Not Connected</h4>
-                      <p>Connect your WhatsApp account to start using the web interface.</p>
-                    </div>
-                    <a href="/connect" class="btn btn-primary full-width btn-large">
-                      <span class="btn-icon">🔗</span>
-                      Connect WhatsApp
-                    </a>
-                  `}
+                    </span>
+                  </button>
+                ` : `
+                  <div class="no-connection">
+                    <div class="no-connection-icon">📱</div>
+                    <h4>Not Connected</h4>
+                    <p>Connect your WhatsApp account to start using the web interface.</p>
+                  </div>
+                  <a href="/connect" class="btn btn-primary full-width btn-large">
+                    <span class="btn-icon">🔗</span>
+                    Connect WhatsApp
+                  </a>
+                `}
+              </div>
+            </div>
+
+            <!-- Quick Actions Card -->
+            <div class="quick-actions-card">
+              <div class="card-header">
+                <h3>Quick Actions</h3>
+              </div>
+              <div class="card-body">
+                <div class="action-grid">
+                  <button class="action-btn ${!isConnected ? 'disabled' : ''}" ${!isConnected ? 'disabled' : ''}>
+                    <span class="action-icon">💬</span>
+                    <span class="action-text">Messages</span>
+                  </button>
+                  <button class="action-btn ${!isConnected ? 'disabled' : ''}" ${!isConnected ? 'disabled' : ''}>
+                    <span class="action-icon">👥</span>
+                    <span class="action-text">Contacts</span>
+                  </button>
+                  <button class="action-btn ${!isConnected ? 'disabled' : ''}" ${!isConnected ? 'disabled' : ''}>
+                    <span class="action-icon">📊</span>
+                    <span class="action-text">Analytics</span>
+                  </button>
+                  <button class="action-btn ${!isConnected ? 'disabled' : ''}" ${!isConnected ? 'disabled' : ''}>
+                    <span class="action-icon">⚙️</span>
+                    <span class="action-text">Settings</span>
+                  </button>
                 </div>
               </div>
+            </div>
 
-              <!-- Quick Actions Card -->
-              <div class="quick-actions-card">
-                <div class="card-header">
-                  <h3>Quick Actions</h3>
-                </div>
-                <div class="card-body">
-                  <div class="action-grid">
-                    <button class="action-btn ${!isConnected ? 'disabled' : ''}" ${!isConnected ? 'disabled' : ''}>
-                      <span class="action-icon">💬</span>
-                      <span class="action-text">Messages</span>
-                    </button>
-                    <button class="action-btn ${!isConnected ? 'disabled' : ''}" ${!isConnected ? 'disabled' : ''}>
-                      <span class="action-icon">👥</span>
-                      <span class="action-text">Contacts</span>
-                    </button>
-                    <button class="action-btn ${!isConnected ? 'disabled' : ''}" ${!isConnected ? 'disabled' : ''}>
-                      <span class="action-icon">📊</span>
-                      <span class="action-text">Analytics</span>
-                    </button>
-                    <button class="action-btn ${!isConnected ? 'disabled' : ''}" ${!isConnected ? 'disabled' : ''}>
-                      <span class="action-icon">⚙️</span>
-                      <span class="action-text">Settings</span>
-                    </button>
+            <!-- Connection Details Card -->
+            <div class="details-card">
+              <div class="card-header">
+                <h3>Connection Details</h3>
+              </div>
+              <div class="card-body">
+                <div class="detail-list">
+                  <div class="detail-item">
+                    <span class="detail-label">Session ID:</span>
+                    <span class="detail-value">session_${user.telegram_id}</span>
+                  </div>
+                  <div class="detail-item">
+                    <span class="detail-label">Account Type:</span>
+                    <span class="detail-value">Web User</span>
+                  </div>
+                  <div class="detail-item">
+                    <span class="detail-label">Last Activity:</span>
+                    <span class="detail-value" id="lastActivity">Active now</span>
+                  </div>
+                  <div class="detail-item">
+                    <span class="detail-label">Security Level:</span>
+                    <span class="detail-value success">High</span>
                   </div>
                 </div>
               </div>
+            </div>
 
-              <!-- Connection Details Card -->
-              <div class="details-card">
-                <div class="card-header">
-                  <h3>Connection Details</h3>
-                </div>
-                <div class="card-body">
-                  <div class="detail-list">
-                    <div class="detail-item">
-                      <span class="detail-label">Session ID:</span>
-                      <span class="detail-value">session_${user.telegram_id}</span>
-                    </div>
-                    <div class="detail-item">
-                      <span class="detail-label">Account Type:</span>
-                      <span class="detail-value">Web User</span>
-                    </div>
-                    <div class="detail-item">
-                      <span class="detail-label">Last Activity:</span>
-                      <span class="detail-value" id="lastActivity">Active now</span>
-                    </div>
-                    <div class="detail-item">
-                      <span class="detail-label">Security Level:</span>
-                      <span class="detail-value success">High</span>
+            <!-- Activity Card -->
+            <div class="activity-card">
+              <div class="card-header">
+                <h3>Recent Activity</h3>
+              </div>
+              <div class="card-body">
+                <div class="activity-list">
+                  <div class="activity-item">
+                    <div class="activity-icon success">✅</div>
+                    <div class="activity-content">
+                      <div class="activity-title">Account Created</div>
+                      <div class="activity-time">Today</div>
                     </div>
                   </div>
-                </div>
-              </div>
-
-              <!-- Activity Card -->
-              <div class="activity-card">
-                <div class="card-header">
-                  <h3>Recent Activity</h3>
-                </div>
-                <div class="card-body">
-                  <div class="activity-list">
+                  ${isConnected ? `
                     <div class="activity-item">
-                      <div class="activity-icon success">✅</div>
+                      <div class="activity-icon success">🔗</div>
                       <div class="activity-content">
-                        <div class="activity-title">Account Created</div>
-                        <div class="activity-time">Today</div>
+                        <div class="activity-title">WhatsApp Connected</div>
+                        <div class="activity-time">Just now</div>
                       </div>
                     </div>
-                    ${isConnected ? `
-                      <div class="activity-item">
-                        <div class="activity-icon success">🔗</div>
-                        <div class="activity-content">
-                          <div class="activity-title">WhatsApp Connected</div>
-                          <div class="activity-time">Just now</div>
-                        </div>
-                      </div>
-                    ` : ''}
-                  </div>
+                  ` : ''}
                 </div>
               </div>
             </div>
           </div>
         </div>
       </div>
-    `
-    
-    return this.getBaseHTML('Dashboard', content, 'dashboard-page')
-  }
+      
+      <!-- Auto-refresh script -->
+      <script>
+        // Auto-refresh dashboard status every 10 seconds
+        setInterval(async () => {
+          try {
+            const response = await fetch('/api/status')
+            if (response.ok) {
+              const status = await response.json()
+              
+              // Update UI elements directly
+              const statusCard = document.getElementById('statusCard')
+              const statusDot = document.getElementById('statusDot')
+              const statusText = document.getElementById('statusText')
+              const cardBody = document.getElementById('cardBody')
+              const phoneInfo = document.getElementById('phoneInfo')
+              
+              if (statusCard && statusDot && statusText && cardBody) {
+                const wasConnected = statusCard.classList.contains('connected')
+                const isNowConnected = status.isConnected
+                
+                // Only update if status changed
+                if (wasConnected !== isNowConnected) {
+                  if (isNowConnected) {
+                    statusCard.className = 'status-card connected'
+                    statusDot.className = 'status-dot connected'
+                    statusText.textContent = 'Connected'
+                    
+                    // Update card body to show connected state
+                    cardBody.innerHTML = \`
+                      <div class="connection-info">
+                        <div class="info-item">
+                          <span class="info-label">Phone Number:</span>
+                          <span id="phoneInfo" class="info-value">\${status.phoneNumber || 'N/A'}</span>
+                        </div>
+                        <div class="info-item">
+                          <span class="info-label">Status:</span>
+                          <span class="info-value success">Active</span>
+                        </div>
+                        <div class="info-item">
+                          <span class="info-label">Connection Time:</span>
+                          <span class="info-value" id="connectionTime">Just now</span>
+                        </div>
+                      </div>
+                      <button id="disconnectBtn" class="btn btn-danger full-width">
+                        <span class="btn-loading hidden">
+                          <div class="spinner"></div>
+                          Disconnecting...
+                        </span>
+                        <span class="btn-text">
+                          <span class="btn-icon">🔌</span>
+                          Disconnect WhatsApp
+                        </span>
+                      </button>
+                    \`
+                    
+                    // Re-attach disconnect handler
+                    const disconnectBtn = document.getElementById('disconnectBtn')
+                    if (disconnectBtn && window.modernWebInterface) {
+                      disconnectBtn.addEventListener('click', window.modernWebInterface.handleDisconnect.bind(window.modernWebInterface))
+                    }
+                    
+                  } else {
+                    statusCard.className = 'status-card disconnected'
+                    statusDot.className = 'status-dot disconnected'
+                    statusText.textContent = 'Disconnected'
+                    
+                    // Update card body to show disconnected state
+                    cardBody.innerHTML = \`
+                      <div class="no-connection">
+                        <div class="no-connection-icon">📱</div>
+                        <h4>Not Connected</h4>
+                        <p>Connect your WhatsApp account to start using the web interface.</p>
+                      </div>
+                      <a href="/connect" class="btn btn-primary full-width btn-large">
+                        <span class="btn-icon">🔗</span>
+                        Connect WhatsApp
+                      </a>
+                    \`
+                  }
+                  
+                  // Add visual feedback for status change
+                  statusCard.style.transform = 'scale(1.02)'
+                  setTimeout(() => {
+                    statusCard.style.transform = ''
+                  }, 200)
+                }
+                
+                // Update phone info if available
+                if (phoneInfo && status.phoneNumber) {
+                  phoneInfo.textContent = status.phoneNumber
+                }
+              }
+            }
+          } catch (error) {
+            console.error('Auto-refresh error:', error)
+          }
+        }, 10000)
+      </script>
+    </div>
+  `
+  
+  return this.getBaseHTML('Dashboard', content, 'dashboard-page')
+}
 
   renderConnect(data) {
     const { user } = data

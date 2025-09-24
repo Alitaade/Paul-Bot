@@ -85,22 +85,33 @@ export class WebInterface {
     res.send(this.templates.renderLogin())
   }
 
-  async renderDashboard(req, res) {
-    try {
-      const sessionId = `session_${req.user.telegram_id}`
-      const session = await this.storage.getSession(sessionId)
-      const isConnected = session?.isConnected || false
-      
-      res.send(this.templates.renderDashboard({
-        user: req.user,
-        isConnected,
-        session
-      }))
-    } catch (error) {
-      logger.error('Dashboard render error:', error)
-      res.status(500).send('Server error')
-    }
+  // In web/index.js - Fix renderDashboard method
+async renderDashboard(req, res) {
+  try {
+    const sessionId = `session_${req.user.telegram_id}`
+    
+    // Get FRESH session data (not cached) to ensure accurate status
+    const session = await this.storage.getSessionFresh(sessionId)
+    
+    // Also check if there's an active socket connection
+    const activeSocket = this.sessionManager.getSession(sessionId)
+    const hasActiveSocket = activeSocket && activeSocket.user
+    
+    // Connection is true if either database shows connected OR we have active socket
+    const isConnected = (session?.isConnected || false) || hasActiveSocket
+    
+    logger.debug(`Dashboard render for ${sessionId}: db=${session?.isConnected}, socket=${!!hasActiveSocket}, final=${isConnected}`)
+    
+    res.send(this.templates.renderDashboard({
+      user: req.user,
+      isConnected,
+      session: session || {}
+    }))
+  } catch (error) {
+    logger.error('Dashboard render error:', error)
+    res.status(500).send('Server error')
   }
+}
 
   renderConnectPage(req, res) {
     res.send(this.templates.renderConnect({ user: req.user }))
@@ -352,27 +363,42 @@ export class WebInterface {
     }
   }
 
-  async handleStatus(req, res) {
-    try {
-      const telegramId = req.user.telegram_id
-      const sessionId = `session_${telegramId}`
-      
-      // For web users, check database status directly since web hands over to pterodactyl
-      const session = await this.storage.getSession(sessionId)
-      const isConnected = session?.isConnected || false
-      
-      res.json({
-        isConnected,
-        phoneNumber: session?.phoneNumber || null,
-        connectionStatus: session?.connectionStatus || 'disconnected',
-        sessionId
-      })
+  // In web/index.js - Fix handleStatus method
+async handleStatus(req, res) {
+  try {
+    const telegramId = req.user.telegram_id
+    const sessionId = `session_${telegramId}`
+    
+    // Check both session manager (active socket) AND database
+    const activeSocket = this.sessionManager.getSession(sessionId)
+    const isSocketConnected = activeSocket && activeSocket.user
+    
+    // Get fresh database status (not cached)
+    const session = await this.storage.getSessionFresh(sessionId)
+    const isDatabaseConnected = session?.isConnected || false
+    
+    // True connection means both socket exists OR database shows connected
+    const isReallyConnected = isSocketConnected || isDatabaseConnected
+    
+    logger.debug(`Status check for ${sessionId}: socket=${!!isSocketConnected}, db=${isDatabaseConnected}, final=${isReallyConnected}`)
+    
+    res.json({
+      isConnected: isReallyConnected,
+      phoneNumber: session?.phoneNumber || null,
+      connectionStatus: session?.connectionStatus || 'disconnected',
+      sessionId,
+      debug: {
+        hasSocket: !!activeSocket,
+        socketConnected: isSocketConnected,
+        dbConnected: isDatabaseConnected
+      }
+    })
 
-    } catch (error) {
-      logger.error('Status check error:', error)
-      res.status(500).json({ error: 'Status check failed' })
-    }
+  } catch (error) {
+    logger.error('Status check error:', error)
+    res.status(500).json({ error: 'Status check failed' })
   }
+}
 
   async checkConnectionStatus(req, res) {
     try {

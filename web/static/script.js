@@ -15,6 +15,7 @@ class ModernWebInterface {
       this.setupEventListeners()
       this.setupPasswordStrength()
       this.initializeAnimations()
+      this.initializeDashboardRefresh()
     })
   }
 
@@ -612,25 +613,30 @@ class ModernWebInterface {
   }
 
   showConnectionSuccess(phoneNumber) {
-    const connectionStatus = document.getElementById('connectionStatus')
-    if (connectionStatus) {
-      connectionStatus.className = 'connection-status success'
-      connectionStatus.innerHTML = `
-        <div class="status-icon">✅</div>
-        <div class="status-content">
-          <div class="status-title">Connected Successfully!</div>
-          <div class="status-description">Your WhatsApp account ${phoneNumber} is now connected.</div>
-        </div>
-      `
-    }
-    
-    this.showAlert('WhatsApp connected successfully! Redirecting to dashboard...', 'success')
-    this.animateSuccess()
-    
-    setTimeout(() => {
-      window.location.href = '/dashboard'
-    }, 3000)
+  const connectionStatus = document.getElementById('connectionStatus')
+  if (connectionStatus) {
+    connectionStatus.className = 'connection-status success'
+    connectionStatus.innerHTML = `
+      <div class="status-icon">✅</div>
+      <div class="status-content">
+        <div class="status-title">Connected Successfully!</div>
+        <div class="status-description">Your WhatsApp account ${phoneNumber} is now connected.</div>
+      </div>
+    `
   }
+  
+  this.showAlert('WhatsApp connected successfully! Redirecting to dashboard...', 'success')
+  this.animateSuccess()
+  
+  // Clear any cached data to force refresh
+  if (window.localStorage) {
+    window.localStorage.removeItem('dashboard_cache')
+  }
+  
+  setTimeout(() => {
+    window.location.href = '/dashboard?refresh=1'
+  }, 3000)
+}
 
   showConnectionTimeout() {
     const connectionStatus = document.getElementById('connectionStatus')
@@ -645,6 +651,20 @@ class ModernWebInterface {
       `
     }
   }
+
+  initializeDashboardRefresh() {
+  // If we came from connection success, refresh status immediately
+  const urlParams = new URLSearchParams(window.location.search)
+  if (urlParams.get('refresh') === '1') {
+    // Remove the parameter from URL
+    window.history.replaceState({}, document.title, window.location.pathname)
+    
+    // Force status refresh
+    setTimeout(() => {
+      this.refreshStatus()
+    }, 1000)
+  }
+}
 
   showConnectionError(message) {
     const connectionStatus = document.getElementById('connectionStatus')

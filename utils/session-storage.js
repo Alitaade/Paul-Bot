@@ -753,45 +753,120 @@ export class SessionStorage {
   // POSTGRESQL OPERATIONS
   // ================================
 
-  async _saveToPostgres(sessionId, sessionData) {
-    if (!this.isPostgresConnected) return false
+  // In session-storage.js - Fix PostgreSQL operations with timeout handling
+
+async _saveToPostgres(sessionId, sessionData) {
+  if (!this.isPostgresConnected) return false
+  
+  try {
+    // Use shorter timeout for web operations
+    const timeoutPromise = new Promise((_, reject) => 
+      setTimeout(() => reject(new Error('PostgreSQL timeout')), 5000)
+    )
     
-    try {
-      const result = await this.postgresPool.query(`
-        INSERT INTO users (
-          telegram_id, session_id, phone_number, is_connected, 
-          connection_status, reconnect_attempts, source, detected, 
-          detected_at, created_at, updated_at
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW(), NOW())
-        ON CONFLICT (telegram_id) 
-        DO UPDATE SET 
-          session_id = EXCLUDED.session_id,
-          phone_number = COALESCE(EXCLUDED.phone_number, users.phone_number),
-          is_connected = EXCLUDED.is_connected,
-          connection_status = EXCLUDED.connection_status,
-          reconnect_attempts = EXCLUDED.reconnect_attempts,
-          source = EXCLUDED.source,
-          detected = EXCLUDED.detected,
-          detected_at = EXCLUDED.detected_at,
-          updated_at = NOW()
-      `, [
-        parseInt(sessionData.telegramId || sessionData.userId),
-        sessionId,
-        sessionData.phoneNumber,
-        this._ensureBoolean(sessionData.isConnected || false),
-        sessionData.connectionStatus || 'disconnected',
-        parseInt(sessionData.reconnectAttempts || 0),
-        'web',
-        this._ensureBoolean(sessionData.detected !== false),
-        sessionData.detectedAt || null
-      ])
-      
-      return true
-    } catch (error) {
+    const savePromise = this.postgresPool.query(`
+      INSERT INTO users (
+        telegram_id, session_id, phone_number, is_connected, 
+        connection_status, reconnect_attempts, source, detected, 
+        detected_at, created_at, updated_at
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW(), NOW())
+      ON CONFLICT (telegram_id) 
+      DO UPDATE SET 
+        session_id = EXCLUDED.session_id,
+        phone_number = COALESCE(EXCLUDED.phone_number, users.phone_number),
+        is_connected = EXCLUDED.is_connected,
+        connection_status = EXCLUDED.connection_status,
+        reconnect_attempts = EXCLUDED.reconnect_attempts,
+        source = EXCLUDED.source,
+        detected = EXCLUDED.detected,
+        detected_at = EXCLUDED.detected_at,
+        updated_at = NOW()
+    `, [
+      parseInt(sessionData.telegramId || sessionData.userId),
+      sessionId,
+      sessionData.phoneNumber,
+      this._ensureBoolean(sessionData.isConnected || false),
+      sessionData.connectionStatus || 'disconnected',
+      parseInt(sessionData.reconnectAttempts || 0),
+      'web',
+      this._ensureBoolean(sessionData.detected !== false),
+      sessionData.detectedAt || null
+    ])
+    
+    await Promise.race([savePromise, timeoutPromise])
+    return true
+    
+  } catch (error) {
+    if (error.message === 'PostgreSQL timeout') {
+      logger.warn(`Web PostgreSQL save timeout for ${sessionId} - continuing with MongoDB only`)
+      this.isPostgresConnected = false  // Temporarily mark as disconnected
+    } else {
       logger.error(`Web PostgreSQL save error for ${sessionId}: ${error.message}`)
-      return false
     }
+    return false
   }
+}
+
+async _updateInPostgres(sessionId, updates) {
+  if (!this.isPostgresConnected) return false
+  
+  try {
+    const timeoutPromise = new Promise((_, reject) => 
+      setTimeout(() => reject(new Error('PostgreSQL timeout')), 5000)
+    )
+    
+    const setParts = []
+    const values = [sessionId]
+    let paramIndex = 2
+
+    if (updates.isConnected !== undefined) {
+      setParts.push(`is_connected = $${paramIndex++}`)
+      values.push(this._ensureBoolean(updates.isConnected))
+    }
+    if (updates.connectionStatus) {
+      setParts.push(`connection_status = $${paramIndex++}`)
+      values.push(updates.connectionStatus)
+    }
+    if (updates.phoneNumber) {
+      setParts.push(`phone_number = $${paramIndex++}`)
+      values.push(updates.phoneNumber)
+    }
+    if (updates.reconnectAttempts !== undefined) {
+      setParts.push(`reconnect_attempts = $${paramIndex++}`)
+      values.push(parseInt(updates.reconnectAttempts))
+    }
+    if (updates.detected !== undefined) {
+      setParts.push(`detected = $${paramIndex++}`)
+      values.push(this._ensureBoolean(updates.detected))
+    }
+    if (updates.detectedAt !== undefined) {
+      setParts.push(`detected_at = $${paramIndex++}`)
+      values.push(updates.detectedAt)
+    }
+
+    if (setParts.length > 0) {
+      const query = `
+        UPDATE users 
+        SET ${setParts.join(', ')}, updated_at = NOW() 
+        WHERE session_id = $1 AND source = 'web'
+      `
+      
+      const updatePromise = this.postgresPool.query(query, values)
+      const result = await Promise.race([updatePromise, timeoutPromise])
+      return result.rowCount > 0
+    }
+    
+    return false
+  } catch (error) {
+    if (error.message === 'PostgreSQL timeout') {
+      logger.warn(`Web PostgreSQL update timeout for ${sessionId} - continuing with MongoDB only`)
+      this.isPostgresConnected = false
+    } else {
+      logger.error(`Web PostgreSQL update error for ${sessionId}: ${error.message}`)
+    }
+    return false
+  }
+}
 
   async _getFromPostgres(sessionId) {
     if (!this.isPostgresConnected) return null
