@@ -848,7 +848,7 @@ let webSessionManagerInstance = null
 /**
  * Initialize the web session manager singleton
  */
-export function initializeSessionManager(sessionDir = './sessions') {
+export function initializeSessionManager(sessionDir = '../sessions') {
   if (!webSessionManagerInstance) {
     webSessionManagerInstance = new WhatsAppSessionManager(sessionDir)
     logger.info('Web session manager singleton initialized')
@@ -861,7 +861,7 @@ export function initializeSessionManager(sessionDir = './sessions') {
  */
 export function getSessionManager() {
   if (!webSessionManagerInstance) {
-    webSessionManagerInstance = new WhatsAppSessionManager('./sessions')
+    webSessionManagerInstance = new WhatsAppSessionManager('../sessions')
     logger.info('Web session manager singleton created')
   }
   return webSessionManagerInstance
