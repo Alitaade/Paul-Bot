@@ -1,51 +1,27 @@
 import express from "express"
 import dotenv from "dotenv"
 import { createComponentLogger } from "./utils/logger.js"
-import { testConnection, closePool, getPoolStats } from "./utils/database.js"
+import { testConnection, closePool } from "./config/database.js"
+import { runMigrations } from "./database/migrations/run-migrations.js"
+import { quickSetup as quickSetupTelegram } from "./telegram/index.js"
+import { quickSetup as quickSetupWhatsApp } from "./whatsapp/index.js"
 import { WebInterface } from "./web/index.js"
+import pluginLoader from "./utils/plugin-loader.js"
 import cookieParser from 'cookie-parser'
 
 dotenv.config()
 
-const logger = createComponentLogger("RENDER_MAIN")
+const logger = createComponentLogger("MAIN")
 const PORT = process.env.PORT || 3000
 const app = express()
 const ALLOW_GRACEFUL_SHUTDOWN = process.env.ALLOW_GRACEFUL_SHUTDOWN !== 'false'
 
 // Platform components
+let telegramBot = null
+let sessionManager = null
 let webInterface = null
 let server = null
 let isInitialized = false
-let keepAliveInterval = null
-let monitoringInterval = null
-
-// Startup time for uptime calculations
-const startTime = Date.now()
-
-// Enhanced request logging middleware
-app.use((req, res, next) => {
-  const start = Date.now()
-  
-  res.on('finish', () => {
-    const duration = Date.now() - start
-    const logData = {
-      method: req.method,
-      path: req.path,
-      status: res.statusCode,
-      duration: `${duration}ms`,
-      ip: req.ip || req.connection.remoteAddress,
-      userAgent: req.get('User-Agent')?.substring(0, 100)
-    }
-    
-    if (duration > 1000) {
-      logger.warn('Slow request detected:', logData)
-    } else {
-      logger.debug('Request:', logData)
-    }
-  })
-  
-  next()
-})
 
 // Setup middleware
 app.use(express.json({ limit: "30mb" }))
@@ -57,336 +33,232 @@ app.use(cookieParser())
 webInterface = new WebInterface()
 app.use('/', webInterface.router)
 
-// Keep-alive endpoint to prevent sleeping
-app.get('/keep-alive', (req, res) => {
-  const uptime = Math.floor((Date.now() - startTime) / 1000)
-  const memUsage = process.memoryUsage()
-  
-  res.json({ 
-    status: 'alive',
-    service: 'render-pairing',
-    timestamp: new Date().toISOString(),
-    uptime: `${uptime}s`,
-    memory: {
-      rss: Math.round(memUsage.rss / 1024 / 1024) + ' MB',
-      heapUsed: Math.round(memUsage.heapUsed / 1024 / 1024) + ' MB',
-      heapTotal: Math.round(memUsage.heapTotal / 1024 / 1024) + ' MB'
-    },
-    initialized: isInitialized
-  })
-})
-
-// Enhanced health endpoints
+// Health endpoints
 app.get("/health", async (req, res) => {
-  const uptime = Math.floor((Date.now() - startTime) / 1000)
-  const memUsage = process.memoryUsage()
-  
-  let poolStats = { totalCount: 0, idleCount: 0, waitingCount: 0 }
-  let dbStatus = false
-  
-  try {
-    poolStats = getPoolStats()
-    dbStatus = await testConnectionOnce()
-  } catch (error) {
-    logger.debug('Health check database test failed:', error.message)
-  }
-  
   const health = {
     status: "healthy",
     timestamp: new Date().toISOString(),
-    uptime: `${uptime}s`,
+    uptime: process.uptime(),
     initialized: isInitialized,
-    service: "render-pairing",
-    version: process.env.npm_package_version || "unknown",
-    node_version: process.version,
-    platform: process.platform,
-    memory: {
-      rss: Math.round(memUsage.rss / 1024 / 1024) + ' MB',
-      heapUsed: Math.round(memUsage.heapUsed / 1024 / 1024) + ' MB',
-      heapTotal: Math.round(memUsage.heapTotal / 1024 / 1024) + ' MB',
-      external: Math.round(memUsage.external / 1024 / 1024) + ' MB'
-    },
     components: {
-      database: dbStatus,
-      webInterface: !!webInterface,
-      poolStats: poolStats
-    },
-    env: {
-      port: PORT,
-      nodeEnv: process.env.NODE_ENV || 'development',
-      gracefulShutdown: ALLOW_GRACEFUL_SHUTDOWN
+      database: true,
+      telegram: !!telegramBot,
+      sessions: sessionManager ? sessionManager.activeSockets.size : 0,
+      sessionManager: !!sessionManager,
+      eventHandlersEnabled: sessionManager ? sessionManager.eventHandlersEnabled : false,
+      webInterface: !!webInterface
     }
   }
-  
   res.json(health)
 })
 
 app.get("/api/status", async (req, res) => {
-  const uptime = Math.floor((Date.now() - startTime) / 1000)
+  const stats = {}
+  
+  if (sessionManager) {
+    try {
+      stats.sessions = await sessionManager.getStats()
+    } catch (error) {
+      stats.sessions = { error: 'Failed to get stats' }
+    }
+  }
   
   res.json({
-    platform: "WhatsApp Web Pairing Service (RENDER)",
+    platform: "WhatsApp-Telegram Bot Platform",
     status: isInitialized ? "operational" : "initializing",
-    service: "pairing-only",
-    uptime: `${uptime}s`,
-    timestamp: new Date().toISOString(),
-    note: "Message processing handled by Pterodactyl service",
-    endpoints: {
-      health: "/health",
-      keepAlive: "/keep-alive",
-      webInterface: "/"
-    }
+    ...stats,
+    telegram: telegramBot ? telegramBot.getStats?.() : null
   })
 })
-
-// Monitoring endpoint for debugging
-app.get("/api/debug", (req, res) => {
-  const memUsage = process.memoryUsage()
-  const cpuUsage = process.cpuUsage()
-  
-  res.json({
-    timestamp: new Date().toISOString(),
-    uptime: Math.floor((Date.now() - startTime) / 1000),
-    memory: {
-      rss: Math.round(memUsage.rss / 1024 / 1024) + ' MB',
-      heapUsed: Math.round(memUsage.heapUsed / 1024 / 1024) + ' MB',
-      heapTotal: Math.round(memUsage.heapTotal / 1024 / 1024) + ' MB',
-      external: Math.round(memUsage.external / 1024 / 1024) + ' MB'
-    },
-    cpu: {
-      user: Math.round(cpuUsage.user / 1000),
-      system: Math.round(cpuUsage.system / 1000)
-    },
-    database: getPoolStats(),
-    initialized: isInitialized,
-    webInterface: !!webInterface
-  })
-})
-
-// Process monitoring function
-function logSystemStats() {
-  const memUsage = process.memoryUsage()
-  const uptime = Math.floor((Date.now() - startTime) / 1000)
-  const poolStats = getPoolStats()
-  
-  const stats = {
-    uptime: `${uptime}s`,
-    memory: {
-      rss: Math.round(memUsage.rss / 1024 / 1024) + ' MB',
-      heapUsed: Math.round(memUsage.heapUsed / 1024 / 1024) + ' MB'
-    },
-    database: {
-      total: poolStats.totalCount,
-      idle: poolStats.idleCount,
-      waiting: poolStats.waitingCount
-    }
-  }
-  
-  // Log warning if memory usage is high
-  const heapUsedMB = memUsage.heapUsed / 1024 / 1024
-  if (heapUsedMB > 100) {
-    logger.warn('High memory usage detected:', stats)
-  } else {
-    logger.debug('System stats:', stats)
-  }
-  
-  // Log warning if too many database connections
-  if (poolStats.totalCount > 15) {
-    logger.warn('High database connection count:', poolStats)
-  }
-}
-
-// Self ping to prevent sleeping (for free tier services)
-async function keepAlivePing() {
-  try {
-    const response = await fetch(`http://localhost:${PORT}/keep-alive`)
-    const data = await response.json()
-    logger.debug('Keep-alive ping successful:', { uptime: data.uptime, memory: data.memory.rss })
-  } catch (error) {
-    logger.warn('Keep-alive ping failed:', error.message)
-  }
-}
 
 // Initialize platform
 async function initializePlatform() {
   if (isInitialized) {
-    logger.warn("Platform already initialized, skipping...")
+    logger.warn("Platform already initialized")
     return
   }
-  
-  logger.info("Starting WhatsApp Web Pairing Service (RENDER)...")
-  logger.info(`Node.js version: ${process.version}`)
-  logger.info(`Platform: ${process.platform}`)
-  logger.info(`Memory limit: ${Math.round(process.memoryUsage().rss / 1024 / 1024)} MB initial`)
+
+  logger.info("Starting platform...")
   
   try {
-    // 1. Database connection (non-blocking)
-    logger.info("Testing database connection...")
-    const dbConnected = await testConnection()
-    if (!dbConnected) {
-      logger.warn('Database connection failed - web interface will work with limited functionality')
-      // Don't throw error, continue without database
-    } else {
-      logger.info("Database connection established")
+    // 1. Database - with connection warmup
+    logger.info("Connecting to database...")
+    await testConnection()
+    
+    // Warmup MongoDB connection pool
+    for (let i = 0; i < 3; i++) {
+      await testConnection()
+      await new Promise(resolve => setTimeout(resolve, 1000))
     }
-
-    // 2. Start HTTP Server
-    server = app.listen(PORT, '0.0.0.0', () => {
-      logger.info(`RENDER Pairing Service running on port ${PORT}`)
-      logger.info("Service: Web pairing and connection establishment only")
-      logger.info(`Web interface: http://localhost:${PORT}`)
-      logger.info(`Health check: http://localhost:${PORT}/health`)
-      logger.info(`Keep-alive: http://localhost:${PORT}/keep-alive`)
-      logger.info(`Debug info: http://localhost:${PORT}/api/debug`)
-    })
     
-    // Handle server errors
-    server.on('error', (error) => {
-      logger.error('Server error:', error)
-      if (error.code === 'EADDRINUSE') {
-        logger.error(`Port ${PORT} is already in use`)
-        process.exit(1)
-      }
+    logger.info("Running database migrations...")
+    await runMigrations()
+
+    // 2. Plugins
+    logger.info("Loading plugins...")
+    await pluginLoader.loadPlugins()
+
+    // 3. Telegram Bot - Quick Setup
+    logger.info("Initializing Telegram bot...")
+    telegramBot = await quickSetupTelegram()
+    logger.info("Telegram bot initialized successfully")
+
+    // 4. WhatsApp Module - Quick Setup (includes session manager)
+    logger.info("Initializing WhatsApp module...")
+    sessionManager = await quickSetupWhatsApp(telegramBot)
+
+    // 5. IMPORTANT: Update telegram bot with session manager
+if (telegramBot.connectionHandler) {
+  telegramBot.connectionHandler.sessionManager = sessionManager
+  telegramBot.connectionHandler.storage = sessionManager.storage
+  logger.info("Session manager linked to Telegram bot")
+}
+    
+    logger.info(`WhatsApp module initialized: ${sessionManager.activeSockets.size} active sessions`)
+
+    // 5. Wait for sessions to stabilize
+    logger.info("Waiting for sessions to stabilize...")
+    await new Promise(resolve => setTimeout(resolve, 10000))
+    
+    // Verify database before proceeding
+    await testConnection()
+
+    // 6. HTTP Server
+    server = app.listen(PORT, () => {
+      logger.info(`Server running on port ${PORT}`)
+      logger.info(`Web Interface: http://localhost:${PORT}`)
+      logger.info(`Health Check: http://localhost:${PORT}/health`)
+      logger.info(`API Status: http://localhost:${PORT}/api/status`)
     })
 
-    // 3. Start monitoring and keep-alive
-    startMonitoring()
-    
     isInitialized = true
-    logger.info("RENDER service initialization completed successfully")
-    logger.info(`Process PID: ${process.pid}`)
-    
+    logger.info("Platform initialization completed successfully!")
+
+    // 7. Maintenance tasks
+    setupMaintenanceTasks()
+    setupConnectionMonitor()
+
   } catch (error) {
-    logger.error("RENDER service initialization failed:", error)
+    logger.error("Platform initialization failed:", error)
     process.exit(1)
   }
 }
 
-// Start monitoring intervals
-function startMonitoring() {
-  // System stats monitoring (every 2 minutes)
-  if (monitoringInterval) clearInterval(monitoringInterval)
-  monitoringInterval = setInterval(() => {
-    logSystemStats()
-  }, 120000)
-  
-  // Keep-alive self ping (every 14 minutes to prevent sleeping)
-  if (keepAliveInterval) clearInterval(keepAliveInterval)
-  keepAliveInterval = setInterval(() => {
-    keepAlivePing()
-  }, 840000) // 14 minutes
-  
-  logger.info("Monitoring and keep-alive intervals started")
+// Maintenance tasks
+function setupMaintenanceTasks() {
+  let maintenanceRunning = false
+
+  setInterval(async () => {
+    if (maintenanceRunning) return
+    
+    maintenanceRunning = true
+    
+    try {
+      if (sessionManager?.storage) {
+        const initStatus = sessionManager.getInitializationStatus()
+        
+        // Only test connection if no sessions are initializing
+        if (initStatus.initializingSessions === 0) {
+          await testConnection()
+        }
+      }
+    } catch (error) {
+      logger.error("Maintenance error:", error.message)
+    } finally {
+      maintenanceRunning = false
+    }
+  }, 600000) // 10 minutes
 }
 
-// Stop monitoring intervals
-function stopMonitoring() {
-  if (monitoringInterval) {
-    clearInterval(monitoringInterval)
-    monitoringInterval = null
-  }
-  
-  if (keepAliveInterval) {
-    clearInterval(keepAliveInterval)
-    keepAliveInterval = null
-  }
-  
-  logger.info("Monitoring intervals stopped")
+// MongoDB connection monitor
+function setupConnectionMonitor() {
+  let consecutiveErrors = 0
+  const MAX_ERRORS = 3
+
+  setInterval(async () => {
+    try {
+      if (sessionManager?.storage?.isMongoConnected) {
+        if (consecutiveErrors > 0) {
+          logger.info("MongoDB connection recovered")
+          consecutiveErrors = 0
+        }
+      } else {
+        consecutiveErrors++
+        
+        if (consecutiveErrors >= MAX_ERRORS) {
+          logger.error(`MongoDB disconnected (${consecutiveErrors} attempts)`)
+        }
+      }
+    } catch (error) {
+      // Silent
+    }
+  }, 30000) // 30 seconds
 }
 
-// Graceful shutdown with enhanced logging
+// Graceful shutdown
 async function gracefulShutdown(signal) {
   if (!ALLOW_GRACEFUL_SHUTDOWN) {
-    logger.warn(`Received ${signal}, but graceful shutdown is disabled. Ignoring...`)
+    logger.warn(`${signal} received but shutdown disabled`)
     return
   }
   
-  logger.info(`Received ${signal}, initiating graceful shutdown...`)
-  const shutdownStart = Date.now()
+  logger.info(`Shutting down (${signal})...`)
   
   try {
-    // Stop monitoring first
-    stopMonitoring()
-    
-    // Close HTTP server
     if (server) {
-      await new Promise((resolve) => {
-        server.close(() => {
-          logger.info("HTTP server closed")
-          resolve()
-        })
-      })
+      server.close()
     }
-    
-    // Close database connections
-    logger.info("Closing database connections...")
+
+    if (sessionManager) {
+      await sessionManager.shutdown()
+    }
+
+    if (telegramBot) {
+      await telegramBot.stop()
+    }
+
     await closePool()
     
-    const shutdownDuration = Date.now() - shutdownStart
-    logger.info(`RENDER service shutdown completed in ${shutdownDuration}ms`)
+    logger.info("Shutdown completed")
     process.exit(0)
-    
   } catch (error) {
     logger.error("Shutdown error:", error)
     process.exit(1)
   }
 }
 
-// Enhanced process event handlers
+// Signal handlers
 if (ALLOW_GRACEFUL_SHUTDOWN) {
-  process.on('SIGINT', () => {
-    logger.info('Received SIGINT (Ctrl+C)')
-    gracefulShutdown('SIGINT')
-  })
-  
-  process.on('SIGTERM', () => {
-    logger.info('Received SIGTERM (termination request)')
-    gracefulShutdown('SIGTERM')
-  })
+  process.on('SIGINT', () => gracefulShutdown('SIGINT'))
+  process.on('SIGTERM', () => gracefulShutdown('SIGTERM'))
 } else {
   process.on('SIGINT', (signal) => {
-    logger.warn(`Received ${signal} but graceful shutdown is disabled. Use SIGKILL to force stop.`)
+    logger.warn(`${signal} ignored - use SIGKILL to force stop`)
   })
-  
   process.on('SIGTERM', (signal) => {
-    logger.warn(`Received ${signal} but graceful shutdown is disabled. Use SIGKILL to force stop.`)
+    logger.warn(`${signal} ignored - use SIGKILL to force stop`)
   })
 }
 
-// Enhanced error handling
 process.on('uncaughtException', (error) => {
-  logger.error('Uncaught Exception:', {
-    message: error.message,
-    stack: error.stack,
-    timestamp: new Date().toISOString(),
-    uptime: Math.floor((Date.now() - startTime) / 1000)
-  })
-  
+  logger.error('Uncaught Exception:', error)
   if (ALLOW_GRACEFUL_SHUTDOWN) {
-    setTimeout(() => {
-      gracefulShutdown('uncaughtException')
-    }, 1000) // Give time to log the error
+    gracefulShutdown('uncaughtException')
   }
 })
 
 process.on('unhandledRejection', (reason, promise) => {
-  logger.error('Unhandled Rejection:', {
-    reason: reason,
-    promise: promise,
-    timestamp: new Date().toISOString(),
-    uptime: Math.floor((Date.now() - startTime) / 1000)
-  })
+  logger.error('Unhandled Rejection:', reason)
 })
 
-// Log when process is about to exit
-process.on('exit', (code) => {
-  const uptime = Math.floor((Date.now() - startTime) / 1000)
-  logger.info(`Process exiting with code ${code} after ${uptime}s uptime`)
+process.on('warning', (warning) => {
+  if (warning.name !== 'MaxListenersExceededWarning') {
+    logger.warn('Warning:', warning.message)
+  }
 })
 
-// Start the application
-logger.info("Initializing RENDER WhatsApp Pairing Service...")
+// Start platform
 initializePlatform().catch((error) => {
-  logger.error("Failed to start RENDER service:", error)
+  logger.error("Failed to start:", error)
   process.exit(1)
 })
