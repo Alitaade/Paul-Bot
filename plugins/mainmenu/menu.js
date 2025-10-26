@@ -1,6 +1,7 @@
 import path from 'path';
 import { fileURLToPath } from 'url';
 import fs from 'fs';
+import { generateWAMessageFromContent, proto, prepareWAMessageMedia } from '@whiskeysockets/baileys';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -23,7 +24,7 @@ export default {
         }
       }
 
-      // Import menu system with error handling
+      // Import menu system
       let menuSystem;
       try {
         const menuModule = await import("../../utils/menu-system.js");
@@ -33,13 +34,13 @@ export default {
         throw new Error("Menu system not available");
       }
       
-      // Get user info safely
+      // Get user info
       const userInfo = {
         name: m.pushName || m.sender?.split('@')[0] || "User",
         id: m.sender,
       };
       
-      // Get menu folders with timeout
+      // Get menu folders
       const folders = await Promise.race([
         menuSystem.scanMenuFolders(),
         new Promise((_, reject) => setTimeout(() => reject(new Error("Timeout")), 5000))
@@ -59,8 +60,8 @@ export default {
       captionText += `│⏰ ᴛɪᴍᴇ: ${currentTime.toLocaleTimeString()}\n`;
       captionText += `│🛠 ᴠᴇʀsɪᴏɴ: 1.0.0\n`;
       captionText += `└─────────────┈⳹\n\n`;
-      captionText += `🎯 Select a menu category:\n`;
-      captionText += `📊 Total Categories: ${folders.length + 1}\n\n`;
+      captionText += `🎯 Select a menu category below:\n`;
+      captionText += `📊 Total Categories: ${folders.length + 1}\n`;
       
       // Priority order for menus
       const priorityMenus = [
@@ -68,7 +69,7 @@ export default {
         'aimenu', 'ownermenu', 'convertmenu', 'bugmenu'
       ];
       
-      // Sort folders by priority, then alphabetically
+      // Sort folders by priority
       const sortedFolders = folders.sort((a, b) => {
         const aIndex = priorityMenus.indexOf(a.name.toLowerCase());
         const bIndex = priorityMenus.indexOf(b.name.toLowerCase());
@@ -77,38 +78,29 @@ export default {
         if (bIndex === -1) return -1;
         return aIndex - bIndex;
       });
-      
-      // Add allmenu option first
-      captionText += `📶 *.allmenu* - View all commands\n\n`;
-      
-      // Add menu categories as text
-      captionText += `╭━━━━━━━━━━━━━━━╮\n`;
-      captionText += `│   MENU CATEGORIES   │\n`;
-      captionText += `╰━━━━━━━━━━━━━━━╯\n\n`;
-      
-      for (const folder of sortedFolders) {
-        const emoji = menuSystem.getMenuEmoji(folder.name);
-        const commandName = `.${folder.name.toLowerCase()}`;
-        captionText += `${emoji} *${commandName}*\n`;
-        captionText += `   └ ${folder.displayName}\n\n`;
+
+      // Try to get image (profile picture or local file)
+      let imageBuffer = null;
+      try {
+        // Try to get profile picture with proper error handling
+        const ppUrl = await sock.profilePictureUrl(m.sender, "image").catch(() => null);
+        
+        if (ppUrl) {
+          console.log("[Menu] Profile picture URL found:", ppUrl);
+          const response = await fetch(ppUrl);
+          if (response.ok) {
+            imageBuffer = Buffer.from(await response.arrayBuffer());
+            console.log("[Menu] Using user profile picture");
+          }
+        }
+      } catch (err) {
+        console.log("[Menu] Profile picture fetch error:", err.message);
       }
       
-      captionText += `\n━━━━━━━━━━━━━━━━━━\n`;
-      captionText += `Type any command to view that menu\n`;
-      captionText += `© PAUL BOT`;
-
-      // Try to get user's profile picture with timeout
-      let imageUrl = null;
-      try {
-        imageUrl = await Promise.race([
-          sock.profilePictureUrl(m.sender, "image"),
-          new Promise((_, reject) => setTimeout(() => reject(new Error("Profile pic timeout")), 3000))
-        ]);
-        console.log("[Menu] Using user profile picture");
-      } catch (profileErr) {
-        console.log("[Menu] Profile picture not available, trying local image");
+      // Fallback to local image if profile picture not available
+      if (!imageBuffer) {
+        console.log("[Menu] Trying local image");
         
-        // Try local file approach
         const possiblePaths = [
           path.resolve(process.cwd(), "Defaults", "images", "menu.jpg"),
           path.resolve(process.cwd(), "defaults", "images", "menu.jpg"), 
@@ -117,43 +109,162 @@ export default {
         
         for (const imagePath of possiblePaths) {
           if (fs.existsSync(imagePath)) {
+            imageBuffer = fs.readFileSync(imagePath);
             console.log(`[Menu] Using local image: ${imagePath}`);
-            // Send with local image
-            await sock.sendMessage(m.chat, {
-              image: fs.readFileSync(imagePath),
-              caption: captionText
-            }, { quoted: m });
-            return { success: true };
+            break;
           }
         }
       }
-      
-      // Send message with image or text only
-      if (imageUrl) {
-        await sock.sendMessage(m.chat, {
-          image: { url: imageUrl },
-          caption: captionText
-        }, { quoted: m });
-      } else {
-        // Send text-only message
-        await sock.sendMessage(m.chat, {
-          text: captionText
-        }, { quoted: m });
+
+      // Build menu sections
+      const menuSections = [{
+        title: "Menu Categories",
+        highlight_label: "Popular",
+        rows: []
+      }];
+
+      // Add allmenu first
+      menuSections[0].rows.push({
+        header: "📶 All Commands",
+        title: "All Menu",
+        description: "View all available commands",
+        id: ".allmenu"
+      });
+
+      // Add each menu category
+      for (const folder of sortedFolders) {
+        const emoji = menuSystem.getMenuEmoji(folder.name);
+        menuSections[0].rows.push({
+          header: emoji,
+          title: folder.displayName,
+          description: `View ${folder.displayName.toLowerCase()} commands`,
+          id: `.${folder.name.toLowerCase()}`
+        });
       }
-      
-      console.log("[Menu] Message sent successfully!");
+
+      // Prepare header with image if available
+      let headerConfig = {
+        title: "🤖 PAUL BOT MENU",
+        subtitle: timeGreeting,
+        hasMediaAttachment: false
+      };
+
+      if (imageBuffer) {
+        try {
+          // Use prepareWAMessageMedia to properly prepare the image
+          const mediaMessage = await prepareWAMessageMedia(
+            { image: imageBuffer },
+            { upload: sock.waUploadToServer }
+          );
+          
+          headerConfig = {
+            title: "🤖 PAUL BOT MENU",
+            subtitle: timeGreeting,
+            hasMediaAttachment: true,
+            imageMessage: mediaMessage.imageMessage
+          };
+          console.log("[Menu] Image header prepared successfully");
+        } catch (imgErr) {
+          console.error("[Menu] Failed to prepare image header:", imgErr.message);
+          // Continue without image
+        }
+      }
+
+      // Create interactive message
+      const msg = generateWAMessageFromContent(m.chat, {
+        viewOnceMessage: {
+          message: {
+            messageContextInfo: {
+              deviceListMetadata: {},
+              deviceListMetadataVersion: 2
+            },
+            interactiveMessage: proto.Message.InteractiveMessage.create({
+              contextInfo: {
+                quotedMessage: m.message,
+                participant: m.sender,
+                remoteJid: m.chat,
+                stanzaId: m.key.id
+              },
+              body: proto.Message.InteractiveMessage.Body.create({
+                text: captionText
+              }),
+              footer: proto.Message.InteractiveMessage.Footer.create({
+                text: "© PAUL BOT - Select a category"
+              }),
+              header: proto.Message.InteractiveMessage.Header.create(headerConfig),
+              nativeFlowMessage: proto.Message.InteractiveMessage.NativeFlowMessage.create({
+                buttons: [
+                  {
+                    name: "single_select",
+                    buttonParamsJson: JSON.stringify({
+                      title: "📋 Select Menu",
+                      sections: menuSections
+                    })
+                  },
+                  {
+                    name: "quick_reply",
+                    buttonParamsJson: JSON.stringify({
+                      display_text: "📶 All Commands",
+                      id: ".allmenu"
+                    })
+                  },
+                  {
+                    name: "quick_reply",
+                    buttonParamsJson: JSON.stringify({
+                      display_text: "ℹ️ Bot Info",
+                      id: ".botinfo"
+                    })
+                  },
+                  {
+                    name: "cta_url",
+                    buttonParamsJson: JSON.stringify({
+                      display_text: "💬 Support Group",
+                      url: "https://chat.whatsapp.com/YOUR_GROUP_LINK",
+                      merchant_url: "https://chat.whatsapp.com/YOUR_GROUP_LINK"
+                    })
+                  }
+                ]
+              })
+            })
+          }
+        }
+      }, {});
+
+      // Send the message
+      await sock.relayMessage(msg.key.remoteJid, msg.message, {
+        messageId: msg.key.id
+      });
+
+      console.log("[Menu] Interactive menu sent successfully!");
       return { success: true };
       
     } catch (error) {
       console.error("[Menu] Critical Error:", error);
       
-      // Last resort: send basic error message
+      // Fallback to text-only menu
       try {
+        let fallbackText = `❌ Interactive menu failed, here's text version:\n\n`;
+        
+        const menuModule = await import("../../utils/menu-system.js");
+        const menuSystem = menuModule.default;
+        const folders = await menuSystem.scanMenuFolders();
+        
+        fallbackText += `🎯 *PAUL BOT MENU*\n\n`;
+        fallbackText += `📶 *.allmenu* - View all commands\n\n`;
+        
+        for (const folder of folders) {
+          const emoji = menuSystem.getMenuEmoji(folder.name);
+          fallbackText += `${emoji} *.${folder.name.toLowerCase()}*\n`;
+        }
+        
         await sock.sendMessage(m.chat, { 
-          text: `❌ Menu Error: ${error.message}\n\nTry again in a few seconds or type *.allmenu* for text-only menu.` 
+          text: fallbackText
         }, { quoted: m });
       } catch (finalError) {
-        console.error("[Menu] Even error message failed:", finalError);
+        console.error("[Menu] Even fallback failed:", finalError);
+        await sock.sendMessage(m.chat, { 
+          text: `❌ Menu Error: ${error.message}\n\nType *.allmenu* for text-only menu.` 
+        }, { quoted: m });
       }
       
       return { success: false, error: error.message };

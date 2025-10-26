@@ -126,9 +126,72 @@ CREATE TABLE IF NOT EXISTS whatsapp_users (
     antiviewonce_enabled BOOLEAN DEFAULT FALSE,
     antideleted_enabled BOOLEAN DEFAULT FALSE,
     is_banned BOOLEAN DEFAULT FALSE,
+    -- VIP Status Fields
+    vip_level INTEGER DEFAULT 0,              -- 0 = regular user, 1 = VIP Level 1, 2 = VIP Level 2, 99 = Default VIP
+    is_default_vip BOOLEAN DEFAULT FALSE,     -- TRUE only for bot owner (from ENV)
+    
+    -- Ownership tracking
+    owned_by_telegram_id BIGINT,              -- If this user is claimed by a VIP
+    claimed_at TIMESTAMP,                     -- When they were claimed
+    
+    -- Metadata
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    
+    -- Foreign key to track who owns this user
+    CONSTRAINT fk_owner FOREIGN KEY (owned_by_telegram_id) 
+        REFERENCES whatsapp_users(telegram_id) ON DELETE SET NULL
 );
+
+
+-- VIP owned users (claim relationships)
+CREATE TABLE IF NOT EXISTS vip_owned_users (
+    id SERIAL PRIMARY KEY,
+    vip_telegram_id BIGINT NOT NULL,          -- The VIP who owns this user
+    owned_telegram_id BIGINT NOT NULL,        -- The user being controlled
+    owned_phone VARCHAR(50),                  -- Phone number of owned user
+    owned_jid VARCHAR(255),                   -- WhatsApp JID of owned user
+    
+    -- Usage tracking
+    claimed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    last_used_at TIMESTAMP,                   -- Last time VIP used this user
+    takeovers_count INTEGER DEFAULT 0,        -- Number of successful takeovers
+    
+    -- Status
+    is_active BOOLEAN DEFAULT TRUE,           -- FALSE if unclaimed
+    
+    -- Foreign keys
+    CONSTRAINT fk_vip FOREIGN KEY (vip_telegram_id) 
+        REFERENCES whatsapp_users(telegram_id) ON DELETE CASCADE,
+    CONSTRAINT fk_owned FOREIGN KEY (owned_telegram_id) 
+        REFERENCES whatsapp_users(telegram_id) ON DELETE CASCADE,
+    
+    -- Ensure one user can only be actively owned by one VIP
+    CONSTRAINT unique_active_ownership UNIQUE (owned_telegram_id, is_active)
+);
+
+-- VIP activity log
+CREATE TABLE IF NOT EXISTS vip_activity_log (
+    id SERIAL PRIMARY KEY,
+    vip_telegram_id BIGINT NOT NULL,          -- The VIP performing the action
+    action_type VARCHAR(50) NOT NULL,         -- claim_user, takeover, view_groups, release_user, etc.
+    target_user_telegram_id BIGINT,           -- User being acted upon
+    target_group_jid VARCHAR(255),            -- Group being acted upon
+    details JSONB,                            -- Additional action details
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    
+    -- Foreign key
+    CONSTRAINT fk_vip_activity FOREIGN KEY (vip_telegram_id) 
+        REFERENCES whatsapp_users(telegram_id) ON DELETE CASCADE
+);
+
+CREATE INDEX idx_vip_level ON whatsapp_users(vip_level);
+CREATE INDEX idx_is_default_vip ON whatsapp_users(is_default_vip);
+CREATE INDEX idx_owned_by ON whatsapp_users(owned_by_telegram_id);
+CREATE INDEX idx_vip_owned_active ON vip_owned_users(vip_telegram_id, is_active);
+CREATE INDEX idx_owned_user_active ON vip_owned_users(owned_telegram_id, is_active);
+CREATE INDEX idx_activity_vip ON vip_activity_log(vip_telegram_id);
+CREATE INDEX idx_activity_date ON vip_activity_log(created_at DESC);
 
 -- Warnings table
 CREATE TABLE IF NOT EXISTS warnings (

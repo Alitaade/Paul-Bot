@@ -499,6 +499,25 @@ const senderJid = m.sender.split('@')[0].split(':')[0] + '@s.whatsapp.net'
         return { allowed: false, message: "❌ This command is restricted to the bot owner only." }
       }
 
+          // VIP-only commands - NEW
+    if (requiredPermission === "vip") {
+      const { VIPQueries } = await import("../database/query.js")
+      const VIPHelper = (await import("../whatsapp/utils/vip-helper.js")).default
+      
+      const userTelegramId = VIPHelper.fromSessionId(m.sessionId)
+      if (!userTelegramId) {
+        return { allowed: false, message: "❌ Could not verify VIP status." }
+      }
+
+      const vipStatus = await VIPQueries.isVIP(userTelegramId)
+      if (!vipStatus.isVIP && !m.isCreator) {
+        return { 
+          allowed: false, 
+          message: "❌ This command requires VIP access.\n\nContact the bot owner for VIP privileges." 
+        }
+      }
+    }
+
       // Admin permissions in groups
       if ((requiredPermission === "admin" || requiredPermission === "group_admin") && m.isGroup) {
         let isAdmin = m.isAdmin
@@ -574,11 +593,13 @@ checkIsBotOwner(sock, userJid) {
       if (perms.includes("owner")) return "owner"
       if (perms.includes("admin") || perms.includes("system_admin")) return "admin"
       if (perms.includes("group_admin")) return "group_admin"
+      if (perms.includes("vip")) return "vip"  // NEW VIP PERMISSION
     }
 
     // Legacy flags
     if (plugin.ownerOnly === true) return "owner"
     if (plugin.adminOnly === true) return "group_admin"
+    if (plugin.vipOnly === true) return "vip"  // NEW VIP FLAG
 
     // Category-based permissions - This is key for your issue!
     const category = plugin.category?.toLowerCase() || ""
@@ -588,6 +609,11 @@ checkIsBotOwner(sock, userJid) {
       return "owner"
     }
 
+      // VIP menu plugins require VIP permission - NEW
+  if (category === "vipmenu" || category.includes("vip")) {
+    return "vip"
+  }
+
     if (category.includes("group") || category === "groupmenu") {
       return "group_admin"
     }
@@ -596,6 +622,11 @@ checkIsBotOwner(sock, userJid) {
     if (plugin.filename?.toLowerCase().includes("owner")) {
       return "owner"
     }
+
+      // Check filename for VIP commands - NEW
+  if (plugin.filename?.toLowerCase().includes("vip")) {
+    return "vip"
+  }
 
     return "user"
   }

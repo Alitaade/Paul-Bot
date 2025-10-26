@@ -6,6 +6,7 @@ import { runMigrations } from "./database/migrations/run-migrations.js"
 import { quickSetup as quickSetupTelegram } from "./telegram/index.js"
 import { quickSetup as quickSetupWhatsApp } from "./whatsapp/index.js"
 import { WebInterface } from "./web/index.js"
+import { VIPHelper }from './whatsapp/index.js'
 import pluginLoader from "./utils/plugin-loader.js"
 import cookieParser from 'cookie-parser'
 
@@ -118,6 +119,15 @@ if (telegramBot.connectionHandler) {
 
     // 5. Wait for sessions to stabilize
     logger.info("Waiting for sessions to stabilize...")
+
+        // Initialize Default VIP from ENV
+    const  vipInitialized = await VIPHelper.initializeDefaultVIP()
+        if (vipInitialized) {
+      console.log('✅ Default VIP initialized successfully')
+    } else {
+      console.warn('⚠️  Warning: Default VIP not initialized - check DEFAULT_VIP_TELEGRAM_ID in .env')
+    }
+
     await new Promise(resolve => setTimeout(resolve, 10000))
     
     // Verify database before proceeding

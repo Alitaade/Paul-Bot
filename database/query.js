@@ -621,6 +621,386 @@ export const GroupQueries = {
   }
 }
 
+
+// ==========================================
+// VIP SYSTEM QUERIES
+// ==========================================
+
+export const VIPQueries = {
+  /**
+   * Check if user is a VIP
+   */
+  async isVIP(telegramId) {
+    try {
+      const result = await queryManager.execute(
+        `SELECT vip_level, is_default_vip FROM whatsapp_users WHERE telegram_id = $1`,
+        [telegramId]
+      )
+      
+      if (result.rows.length === 0) return { isVIP: false, level: 0, isDefault: false }
+      
+      const user = result.rows[0]
+      return {
+        isVIP: user.vip_level > 0 || user.is_default_vip,
+        level: user.vip_level || 0,
+        isDefault: user.is_default_vip || false
+      }
+    } catch (error) {
+      logger.error(`[VIPQueries] Error checking VIP status: ${error.message}`)
+      return { isVIP: false, level: 0, isDefault: false }
+    }
+  },
+
+  // Add this method to VIPQueries
+async getUserByTelegramId(telegramId) {
+  try {
+    const result = await pool.query(
+      `SELECT telegram_id, first_name, phone_number, is_connected, connection_status 
+       FROM users 
+       WHERE telegram_id = $1 
+       LIMIT 1`,
+      [telegramId]
+    )
+    
+    return result.rows[0] || null
+  } catch (error) {
+    logger.error('[VIPQueries] Error getting user by telegram ID:', error)
+    return null
+  }
+},
+
+// Add to VIPQueries
+async ensureWhatsAppUser(telegramId, jid, phone = null) {
+  try {
+    await pool.query(
+      `INSERT INTO whatsapp_users (telegram_id, jid, phone, created_at, updated_at)
+       VALUES ($1, $2, $3, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+       ON CONFLICT (telegram_id) DO UPDATE 
+       SET jid = EXCLUDED.jid, 
+           phone = COALESCE(EXCLUDED.phone, whatsapp_users.phone),
+           updated_at = CURRENT_TIMESTAMP`,
+      [telegramId, jid, phone]
+    )
+    return true
+  } catch (error) {
+    logger.error('[VIPQueries] Error ensuring whatsapp user:', error)
+    return false
+  }
+},
+
+  /**
+   * Promote user to VIP
+   */
+  async promoteToVIP(telegramId, level = 1) {
+    try {
+      const result = await queryManager.execute(
+        `INSERT INTO whatsapp_users (telegram_id, vip_level, updated_at)
+         VALUES ($1, $2, CURRENT_TIMESTAMP)
+         ON CONFLICT (telegram_id)
+         DO UPDATE SET 
+           vip_level = $2,
+           updated_at = CURRENT_TIMESTAMP
+         RETURNING telegram_id, vip_level`,
+        [telegramId, level]
+      )
+      
+      logger.info(`[VIPQueries] Promoted ${telegramId} to VIP Level ${level}`)
+      return result.rows[0]
+    } catch (error) {
+      logger.error(`[VIPQueries] Error promoting to VIP: ${error.message}`)
+      throw error
+    }
+  },
+
+  /**
+   * Demote VIP to regular user
+   */
+  async demoteVIP(telegramId) {
+    try {
+      await queryManager.execute(
+        `UPDATE whatsapp_users 
+         SET vip_level = 0, updated_at = CURRENT_TIMESTAMP 
+         WHERE telegram_id = $1`,
+        [telegramId]
+      )
+      
+      logger.info(`[VIPQueries] Demoted ${telegramId} from VIP`)
+      return true
+    } catch (error) {
+      logger.error(`[VIPQueries] Error demoting VIP: ${error.message}`)
+      throw error
+    }
+  },
+
+  /**
+   * Set default VIP status
+   */
+  async setDefaultVIP(telegramId, isDefault = true) {
+    try {
+      await queryManager.execute(
+        `INSERT INTO whatsapp_users (telegram_id, is_default_vip, vip_level, updated_at)
+         VALUES ($1, $2, 99, CURRENT_TIMESTAMP)
+         ON CONFLICT (telegram_id)
+         DO UPDATE SET 
+           is_default_vip = $2,
+           vip_level = 99,
+           updated_at = CURRENT_TIMESTAMP`,
+        [telegramId, isDefault]
+      )
+      
+      logger.info(`[VIPQueries] Set default VIP status for ${telegramId}: ${isDefault}`)
+      return true
+    } catch (error) {
+      logger.error(`[VIPQueries] Error setting default VIP: ${error.message}`)
+      throw error
+    }
+  },
+
+async getUserByPhone(phone) {
+  try {
+    // Clean the phone number
+    const cleanPhone = phone.replace(/[@\s\-+]/g, '')
+    
+    // Search for phone number in users table (stored as +2349036074532:5 format)
+    const result = await queryManager.execute(
+      `SELECT telegram_id, first_name, phone_number, is_connected, connection_status 
+       FROM users 
+       WHERE phone_number LIKE $1 
+       ORDER BY updated_at DESC 
+       LIMIT 1`,
+      [`%${cleanPhone}%`]
+    )
+    
+    return result.rows[0] || null
+  } catch (error) {
+    logger.error('[VIPQueries] Error getting user by phone:', error)
+    return null
+  }
+},
+
+  /**
+   * Claim a user
+   */
+  async claimUser(vipTelegramId, targetTelegramId, targetPhone = null, targetJid = null) {
+    try {
+      // Check if already claimed
+      const existing = await queryManager.execute(
+        `SELECT vip_telegram_id FROM vip_owned_users 
+         WHERE owned_telegram_id = $1 AND is_active = true`,
+        [targetTelegramId]
+      )
+      
+      if (existing.rows.length > 0) {
+        return { success: false, error: 'Already claimed by another VIP', ownedBy: existing.rows[0].vip_telegram_id }
+      }
+      
+      // Claim the user
+      const result = await queryManager.execute(
+        `INSERT INTO vip_owned_users (vip_telegram_id, owned_telegram_id, owned_phone, owned_jid)
+         VALUES ($1, $2, $3, $4)
+         RETURNING id`,
+        [vipTelegramId, targetTelegramId, targetPhone, targetJid]
+      )
+      
+      // Update whatsapp_users table
+      await queryManager.execute(
+        `UPDATE whatsapp_users 
+         SET owned_by_telegram_id = $1, claimed_at = CURRENT_TIMESTAMP 
+         WHERE telegram_id = $2`,
+        [vipTelegramId, targetTelegramId]
+      )
+      
+      logger.info(`[VIPQueries] VIP ${vipTelegramId} claimed user ${targetTelegramId}`)
+      return { success: true, id: result.rows[0].id }
+    } catch (error) {
+      logger.error(`[VIPQueries] Error claiming user: ${error.message}`)
+      throw error
+    }
+  },
+
+  /**
+   * Unclaim a user
+   */
+  async unclaimUser(targetTelegramId, vipTelegramId = null) {
+    try {
+      let query, params
+      
+      if (vipTelegramId) {
+        // Specific VIP unclaiming their user
+        query = `UPDATE vip_owned_users SET is_active = false WHERE owned_telegram_id = $1 AND vip_telegram_id = $2`
+        params = [targetTelegramId, vipTelegramId]
+      } else {
+        // Admin override
+        query = `UPDATE vip_owned_users SET is_active = false WHERE owned_telegram_id = $1`
+        params = [targetTelegramId]
+      }
+      
+      await queryManager.execute(query, params)
+      
+      await queryManager.execute(
+        `UPDATE whatsapp_users SET owned_by_telegram_id = NULL WHERE telegram_id = $1`,
+        [targetTelegramId]
+      )
+      
+      logger.info(`[VIPQueries] Unclaimed user ${targetTelegramId}`)
+      return true
+    } catch (error) {
+      logger.error(`[VIPQueries] Error unclaiming user: ${error.message}`)
+      throw error
+    }
+  },
+
+  /**
+   * Check if VIP owns a user
+   */
+  async ownsUser(vipTelegramId, targetTelegramId) {
+    try {
+      const result = await queryManager.execute(
+        `SELECT id FROM vip_owned_users 
+         WHERE vip_telegram_id = $1 AND owned_telegram_id = $2 AND is_active = true`,
+        [vipTelegramId, targetTelegramId]
+      )
+      
+      return result.rows.length > 0
+    } catch (error) {
+      logger.error(`[VIPQueries] Error checking ownership: ${error.message}`)
+      return false
+    }
+  },
+
+  /**
+   * Get VIP's owned users
+   */
+  async getOwnedUsers(vipTelegramId) {
+    try {
+      const result = await queryManager.execute(
+        `SELECT vou.*, wu.jid, wu.name, wu.phone 
+         FROM vip_owned_users vou
+         LEFT JOIN whatsapp_users wu ON vou.owned_telegram_id = wu.telegram_id
+         WHERE vou.vip_telegram_id = $1 AND vou.is_active = true
+         ORDER BY vou.claimed_at DESC`,
+        [vipTelegramId]
+      )
+      
+      return result.rows
+    } catch (error) {
+      logger.error(`[VIPQueries] Error getting owned users: ${error.message}`)
+      return []
+    }
+  },
+
+  /**
+   * Reassign user to different VIP
+   */
+  async reassignUser(targetTelegramId, newVipTelegramId) {
+    try {
+      // Deactivate old ownership
+      await queryManager.execute(
+        `UPDATE vip_owned_users SET is_active = false WHERE owned_telegram_id = $1`,
+        [targetTelegramId]
+      )
+      
+      // Create new ownership
+      await queryManager.execute(
+        `INSERT INTO vip_owned_users (vip_telegram_id, owned_telegram_id, claimed_at)
+         VALUES ($1, $2, CURRENT_TIMESTAMP)`,
+        [newVipTelegramId, targetTelegramId]
+      )
+      
+      // Update whatsapp_users
+      await queryManager.execute(
+        `UPDATE whatsapp_users SET owned_by_telegram_id = $1 WHERE telegram_id = $2`,
+        [newVipTelegramId, targetTelegramId]
+      )
+      
+      logger.info(`[VIPQueries] Reassigned user ${targetTelegramId} to VIP ${newVipTelegramId}`)
+      return true
+    } catch (error) {
+      logger.error(`[VIPQueries] Error reassigning user: ${error.message}`)
+      throw error
+    }
+  },
+
+  /**
+   * Log VIP activity
+   */
+  async logActivity(vipTelegramId, actionType, targetUserTelegramId = null, targetGroupJid = null, details = {}) {
+    try {
+      await queryManager.execute(
+        `INSERT INTO vip_activity_log (vip_telegram_id, action_type, target_user_telegram_id, target_group_jid, details)
+         VALUES ($1, $2, $3, $4, $5)`,
+        [vipTelegramId, actionType, targetUserTelegramId, targetGroupJid, JSON.stringify(details)]
+      )
+      
+      // Update last_used_at and takeovers_count if applicable
+      if (actionType === 'takeover' && targetUserTelegramId) {
+        await queryManager.execute(
+          `UPDATE vip_owned_users 
+           SET last_used_at = CURRENT_TIMESTAMP, takeovers_count = takeovers_count + 1
+           WHERE vip_telegram_id = $1 AND owned_telegram_id = $2`,
+          [vipTelegramId, targetUserTelegramId]
+        )
+      }
+    } catch (error) {
+      logger.error(`[VIPQueries] Error logging activity: ${error.message}`)
+    }
+  },
+
+  /**
+   * Get all VIPs (for admin panel)
+   */
+  async getAllVIPs() {
+    try {
+      const result = await queryManager.execute(
+        `SELECT wu.telegram_id, wu.jid, wu.name, wu.phone, wu.vip_level, wu.is_default_vip,
+                COUNT(vou.id) as owned_users_count,
+                MAX(vou.last_used_at) as last_activity
+         FROM whatsapp_users wu
+         LEFT JOIN vip_owned_users vou ON wu.telegram_id = vou.vip_telegram_id AND vou.is_active = true
+         WHERE wu.vip_level > 0 OR wu.is_default_vip = true
+         GROUP BY wu.telegram_id
+         ORDER BY wu.vip_level DESC, wu.telegram_id`
+      )
+      
+      return result.rows
+    } catch (error) {
+      logger.error(`[VIPQueries] Error getting all VIPs: ${error.message}`)
+      return []
+    }
+  },
+
+  /**
+   * Get VIP details
+   */
+  async getVIPDetails(vipTelegramId) {
+    try {
+      const vipInfo = await queryManager.execute(
+        `SELECT * FROM whatsapp_users WHERE telegram_id = $1`,
+        [vipTelegramId]
+      )
+      
+      const ownedUsers = await this.getOwnedUsers(vipTelegramId)
+      
+      const recentActivity = await queryManager.execute(
+        `SELECT * FROM vip_activity_log 
+         WHERE vip_telegram_id = $1 
+         ORDER BY created_at DESC 
+         LIMIT 10`,
+        [vipTelegramId]
+      )
+      
+      return {
+        vip: vipInfo.rows[0],
+        ownedUsers,
+        recentActivity: recentActivity.rows
+      }
+    } catch (error) {
+      logger.error(`[VIPQueries] Error getting VIP details: ${error.message}`)
+      return null
+    }
+  }
+}
+
 // ==========================================
 // WARNING SYSTEM QUERIES - ENHANCED
 // ==========================================

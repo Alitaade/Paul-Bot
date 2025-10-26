@@ -3,8 +3,9 @@ import { createComponentLogger } from '../../utils/logger.js'
 const logger = createComponentLogger('SESSION_HANDLERS')
 
 /**
- * SessionEventHandlers - Sets up connection-specific event handlers
- * These handlers are specific to session lifecycle, not message processing
+ * SessionEventHandlers - FIXED
+ * Sets up connection-specific event handlers
+ * ONLY handles initial connection setup, NOT reconnection logic
  */
 export class SessionEventHandlers {
   constructor(sessionManager) {
@@ -84,8 +85,7 @@ export class SessionEventHandlers {
       // Update in-memory state
       this.sessionManager.sessionState.set(sessionId, updateData)
 
-      // CRITICAL: Setup event handlers if enabled
-      // This must happen AFTER pairing is complete and connection is fully open
+      // Setup event handlers if enabled
       if (this.sessionManager.eventHandlersEnabled && !sock.eventHandlersSetup) {
         await this._setupEventHandlers(sock, sessionId)
         
@@ -135,31 +135,43 @@ export class SessionEventHandlers {
     }
   }
 
-  /**
-   * Send connection notification via Telegram
-   * @private
-   */
-  async _sendConnectionNotification(sessionId, phoneNumber) {
-    try {
-      const session = await this.sessionManager.storage.getSession(sessionId)
+/**
+ * Send connection notification via Telegram
+ * @private
+ */
+async _sendConnectionNotification(sessionId, phoneNumber) {
+  try {
+    const session = await this.sessionManager.storage.getSession(sessionId)
+    
+    if (session?.source === 'telegram' && this.sessionManager.telegramBot && phoneNumber) {
+      const userId = sessionId.replace('session_', '')
       
-      if (session?.source === 'telegram' && this.sessionManager.telegramBot && phoneNumber) {
-        const userId = sessionId.replace('session_', '')
-        
+      // Check if the method exists, otherwise use sendMessage directly
+      if (typeof this.sessionManager.telegramBot.sendConnectionSuccess === 'function') {
         await this.sessionManager.telegramBot.sendConnectionSuccess(
           userId,
           `+${phoneNumber}`
         ).catch(error => {
           logger.error('Failed to send connection notification:', error)
         })
+      } else if (typeof this.sessionManager.telegramBot.sendMessage === 'function') {
+        // Fallback to sendMessage
+        await this.sessionManager.telegramBot.sendMessage(
+          userId,
+          `✅ *WhatsApp Connected!*\n\n📱 Number: +${phoneNumber}\n\nYou can now use the bot to send and receive messages.`,
+          { parse_mode: 'Markdown' }
+        ).catch(error => {
+          logger.error('Failed to send connection notification:', error)
+        })
       }
-    } catch (error) {
-      logger.error('Connection notification error:', error)
     }
+  } catch (error) {
+    logger.error('Connection notification error:', error)
   }
+}
 
   /**
-   * Handle connection close
+   * Handle connection close - FIXED TO PREVENT DUPLICATE RECONNECTION
    * @private
    */
   async _handleConnectionClose(sock, sessionId, lastDisconnect, callbacks) {
@@ -172,7 +184,10 @@ export class SessionEventHandlers {
         connectionStatus: 'disconnected'
       })
 
-      // Import and delegate to ConnectionEventHandler for reconnection logic
+      // CRITICAL FIX: Only delegate to ConnectionEventHandler
+      // Do NOT implement fallback reconnection logic here
+      // This prevents duplicate 515 handling
+      
       try {
         const { ConnectionEventHandler } = await import('../events/index.js')
         
@@ -180,74 +195,24 @@ export class SessionEventHandlers {
           this.sessionManager.connectionEventHandler = new ConnectionEventHandler(this.sessionManager)
         }
 
-        // Delegate the close handling to the event handler
+        // Delegate ALL reconnection logic to ConnectionEventHandler
         await this.sessionManager.connectionEventHandler._handleConnectionClose(
           sock, 
           sessionId, 
           lastDisconnect
         )
+        
+        logger.debug(`Connection close delegated to ConnectionEventHandler for ${sessionId}`)
       } catch (error) {
         logger.error(`Failed to delegate to ConnectionEventHandler for ${sessionId}:`, error)
         
-        // Fallback: basic reconnection logic
-        const isVoluntaryDisconnect = this.sessionManager.voluntarilyDisconnected.has(sessionId)
-        
-        if (!isVoluntaryDisconnect) {
-          logger.info(`Session ${sessionId} will attempt basic reconnection`)
-          setTimeout(() => {
-            this._attemptBasicReconnection(sessionId, callbacks).catch(err => {
-              logger.error(`Basic reconnection failed for ${sessionId}:`, err)
-            })
-          }, 5000)
-        }
+        // CRITICAL: No fallback reconnection here
+        // If ConnectionEventHandler fails to load, just log and exit
+        // This prevents duplicate reconnection attempts that were causing the 515 issue
       }
 
     } catch (error) {
       logger.error(`Connection close handler error for ${sessionId}:`, error)
-    }
-  }
-
-  /**
-   * Basic reconnection attempt (fallback)
-   * @private
-   */
-  async _attemptBasicReconnection(sessionId, callbacks) {
-    try {
-      const session = await this.sessionManager.storage.getSession(sessionId)
-      
-      if (!session) {
-        logger.error(`No session data found for ${sessionId} - cannot reconnect`)
-        return
-      }
-
-      // Increment reconnect attempts
-      const newAttempts = (session.reconnectAttempts || 0) + 1
-      
-      if (newAttempts > 5) {
-        logger.warn(`Session ${sessionId} exceeded max reconnection attempts`)
-        await this.sessionManager.disconnectSession(sessionId, true)
-        return
-      }
-
-      await this.sessionManager.storage.updateSession(sessionId, {
-        reconnectAttempts: newAttempts,
-        connectionStatus: 'reconnecting'
-      })
-
-      logger.info(`Reconnection attempt ${newAttempts} for ${sessionId}`)
-
-      // Create new session
-      await this.sessionManager.createSession(
-        session.userId,
-        session.phoneNumber,
-        callbacks || session.callbacks || {},
-        true, // isReconnect
-        session.source || 'telegram',
-        false // Don't allow pairing on reconnect
-      )
-
-    } catch (error) {
-      logger.error(`Basic reconnection failed for ${sessionId}:`, error)
     }
   }
 

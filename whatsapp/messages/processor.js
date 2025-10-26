@@ -45,102 +45,119 @@ export class MessageProcessor {
     }
   }
 
-  /**
-   * Process message through pipeline
-   */
-  async processMessage(sock, sessionId, m, prefix) {
-    try {
-      await this.initialize()
+/**
+ * Process message through pipeline
+ */
+async processMessage(sock, sessionId, m, prefix) {
+  try {
+    await this.initialize()
 
-      // Validate message
-      if (!m || !m.message) {
-        return { processed: false, error: 'Invalid message object' }
+    // Validate message
+    if (!m || !m.message) {
+      return { processed: false, error: 'Invalid message object' }
+    }
+
+    // **FIX: Set chat, isGroup, and sender FIRST before anything else**
+    if (!m.chat) {
+      m.chat = m.key?.remoteJid || m.from
+    }
+    if (typeof m.isGroup === 'undefined') {
+      m.isGroup = m.chat && m.chat.endsWith('@g.us')
+    }
+    if (!m.sender) {
+      // For group messages, sender is the participant
+      // For private messages, sender is the chat itself
+      if (m.isGroup) {
+        m.sender = m.key?.participant || m.participant || m.key?.remoteJid
+      } else {
+        m.sender = m.chat || m.key?.remoteJid
       }
+    }
 
-      // Get session context
-      m.sessionContext = this._getSessionContext(sessionId)
-      m.sessionId = sessionId
-      m.prefix = prefix
+    // Validate critical fields before continuing
+    if (!m.chat || !m.sender) {
+      logger.error('Missing critical message fields:', { chat: m.chat, sender: m.sender })
+      return { processed: false, error: 'Missing chat or sender information' }
+    }
 
-      // Extract contact info
-      await this._extractContactInfo(sock, m)
+    // Get session context
+    m.sessionContext = this._getSessionContext(sessionId)
+    m.sessionId = sessionId
+    m.prefix = prefix
 
-      // Extract quoted message
-      m.quoted = this.messageExtractor.extractQuotedMessage(m)
+    // Extract contact info
+    await this._extractContactInfo(sock, m)
 
-      // Persist message to database
-      await this.messagePersistence.persistMessage(sessionId, sock, m)
+    // Extract quoted message
+    m.quoted = this.messageExtractor.extractQuotedMessage(m)
 
-      // Set admin status
-      await this._setAdminStatus(sock, m)
+    // **Extract message body BEFORE processing anti-plugins**
+    m.body = this.messageExtractor.extractMessageBody(m)
+    m.text = m.body // Add text alias for compatibility
 
-      // Process anti-plugins first (before command processing)
+    // Set admin status
+    await this._setAdminStatus(sock, m)
+
+    // Determine if it's a command
+    const isCommand = m.body && m.body.startsWith(prefix)
+    m.isCommand = isCommand
+
+    if (isCommand) {
+      this._parseCommand(m, prefix)
+    }
+
+    // **Process anti-plugins AFTER body extraction and BEFORE command check**
+    // Skip anti-plugin processing for commands
+    if (!m.isCommand) {
       await this._processAntiPlugins(sock, sessionId, m)
-
+      
       if (m._wasDeletedByAntiPlugin) {
+        await this.messagePersistence.persistMessage(sessionId, sock, m)
         await this.messageLogger.logEnhancedMessageEntry(sock, sessionId, m)
         return { processed: true, deletedByAntiPlugin: true }
       }
-
-      // Extract message body
-      if (!m.body) {
-        m.body = this.messageExtractor.extractMessageBody(m)
-      }
-
-      // Determine if it's a command
-      const isCommand = m.body && m.body.startsWith(prefix)
-      m.isCommand = isCommand
-
-      if (isCommand) {
-        this._parseCommand(m, prefix)
-      }
-
-      // Log message
-      await this.messageLogger.logEnhancedMessageEntry(sock, sessionId, m)
-
-      // Handle interactive responses
-      if (m.message?.listResponseMessage) {
-        return await this._handleListResponse(sock, sessionId, m, prefix)
-      }
-
-      if (m.message?.interactiveResponseMessage || 
-          m.message?.templateButtonReplyMessage || 
-          m.message?.buttonsResponseMessage) {
-        return await this._handleInteractiveResponse(sock, sessionId, m, prefix)
-      }
-
-      // Execute command if it's a command
-      if (m.isCommand && m.body && !m._wasDeletedByAntiPlugin) {
-        this.messageStats.commands++
-        return await this._handleCommand(sock, sessionId, m)
-      }
-
-      // Process non-command messages through anti-plugins
-      if (!m.isCommand && !m._wasDeletedByAntiPlugin && m.body && m.body.trim()) {
-        await this._processAntiPluginMessages(sock, sessionId, m)
-        
-        if (m._wasDeletedByAntiPlugin) {
-          return { processed: true, deletedByAntiPlugin: true }
-        }
-      }
-
-      // Process game messages
-      if (!m.isCommand && !m._wasDeletedByAntiPlugin && m.body && m.body.trim()) {
-        const gameResult = await this._handleGameMessage(sock, sessionId, m)
-        if (gameResult) {
-          return gameResult
-        }
-      }
-
-      this.messageStats.processed++
-      return { processed: true }
-
-    } catch (error) {
-      logger.error('Error processing message:', error)
-      this.messageStats.errors++
-      return { error: error.message }
     }
+
+    // Persist message to database
+    await this.messagePersistence.persistMessage(sessionId, sock, m)
+
+    // Log message
+    await this.messageLogger.logEnhancedMessageEntry(sock, sessionId, m)
+
+    // Handle interactive responses
+    if (m.message?.listResponseMessage) {
+      return await this._handleListResponse(sock, sessionId, m, prefix)
+    }
+
+    if (m.message?.interactiveResponseMessage || 
+        m.message?.templateButtonReplyMessage || 
+        m.message?.buttonsResponseMessage) {
+      return await this._handleInteractiveResponse(sock, sessionId, m, prefix)
+    }
+
+    // Execute command if it's a command
+    if (m.isCommand && m.body) {
+      this.messageStats.commands++
+      return await this._handleCommand(sock, sessionId, m)
+    }
+
+    // Process game messages (non-commands only)
+    if (!m.isCommand && m.body && m.body.trim()) {
+      const gameResult = await this._handleGameMessage(sock, sessionId, m)
+      if (gameResult) {
+        return gameResult
+      }
+    }
+
+    this.messageStats.processed++
+    return { processed: true }
+
+  } catch (error) {
+    logger.error('Error processing message:', error)
+    this.messageStats.errors++
+    return { error: error.message }
   }
+}
 
   /**
    * Get session context
@@ -262,41 +279,6 @@ export class MessageProcessor {
       await this.pluginLoader.processAntiPlugins(sock, sessionId, m)
     } catch (error) {
       logger.error('Error processing anti-plugins:', error)
-    }
-  }
-
-  /**
-   * Process anti-plugin messages (non-commands)
-   * @private
-   */
-  async _processAntiPluginMessages(sock, sessionId, m) {
-    try {
-      if (!this.pluginLoader) return
-
-      for (const plugin of this.pluginLoader.antiPlugins.values()) {
-        try {
-          let enabled = true
-          if (typeof plugin.isEnabled === 'function') {
-            enabled = await plugin.isEnabled(m.chat)
-          }
-          if (!enabled) continue
-
-          let shouldProcess = true
-          if (typeof plugin.shouldProcess === 'function') {
-            shouldProcess = await plugin.shouldProcess(m)
-          }
-          if (!shouldProcess) continue
-
-          if (typeof plugin.processMessage === 'function') {
-            await plugin.processMessage(sock, sessionId, m)
-            if (m._wasDeletedByAntiPlugin) break
-          }
-        } catch (pluginError) {
-          logger.error(`Error in anti-plugin ${plugin.name || 'unknown'}:`, pluginError)
-        }
-      }
-    } catch (error) {
-      logger.error('Error processing anti-plugin messages:', error)
     }
   }
 

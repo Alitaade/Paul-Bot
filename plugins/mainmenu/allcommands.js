@@ -1,12 +1,14 @@
 import { createComponentLogger } from "../../utils/logger.js"
 import pluginLoader from "../../utils/plugin-loader.js"
+import { VIPQueries } from "../../database/query.js"
+import VIPHelper from "../../whatsapp/index.js"
 
 const log = createComponentLogger("ALL-COMMANDS")
 
 export default {
   name: "AllCommands",
   description: "Display all available commands organized by category",
-  commands: ["allcommands", "commands", "help","allmenu"],
+  commands: ["allcommands", "commands", "help", "allmenu"],
   category: "both",
   adminOnly: false,
   usage:
@@ -14,6 +16,14 @@ export default {
 
   async execute(sock, sessionId, args, m) {
     try {
+      // Check if user is VIP
+      const userTelegramId = VIPHelper.fromSessionId(sessionId)
+      let isVIP = false
+      if (userTelegramId) {
+        const vipStatus = await VIPQueries.isVIP(userTelegramId)
+        isVIP = vipStatus.isVIP
+      }
+
       // Get all available commands
       const allCommands = pluginLoader.getAvailableCommands()
       const categories = {
@@ -22,8 +32,13 @@ export default {
         both: [],
       }
 
-      // Organize commands by category
+      // Organize commands by category (FILTER OUT VIPMENU)
       allCommands.forEach((cmd) => {
+        // Skip vipmenu commands if user is not VIP
+        if (cmd.category === 'vipmenu' && !isVIP) {
+          return
+        }
+
         const category = cmd.category || "both"
         if (categories[category]) {
           categories[category].push(cmd)
@@ -56,6 +71,9 @@ export default {
 
       message += `\n📊 Total Commands: ${commandCount}\n`
       message += `👑 = Admin Only Commands\n`
+      if (isVIP) {
+        message += `⭐ = VIP Commands (you have access)\n`
+      }
       message += `💡 Use .menu to return to main menu`
 
       await sock.sendMessage(

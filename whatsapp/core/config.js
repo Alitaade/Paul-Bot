@@ -21,14 +21,26 @@ export function createBaileysSocket(authState, customConfig = {}) {
   try {
     const config = {
       ...baileysConfig,
-      auth: authState,
-      ...customConfig
+      auth: authState
     }
 
     const sock = makeWASocket(config)
     
     // Setup default socket properties
     setupSocketDefaults(sock)
+    
+    // ✅ CRITICAL FIX: Override sendMessage to always include ephemeralExpiration
+    // This prevents "old WhatsApp version" warning for ALL messages
+    const originalSendMessage = sock.sendMessage.bind(sock)
+    sock.sendMessage = async (jid, content, options = {}) => {
+      // Always add ephemeralExpiration if not present
+      // 0 = persistent message (never expires)
+      if (!options.ephemeralExpiration) {
+        options.ephemeralExpiration = 0
+      }
+      
+      return await originalSendMessage(jid, content, options)
+    }
     
     return sock
 

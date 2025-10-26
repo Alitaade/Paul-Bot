@@ -12,8 +12,16 @@ const groupCache = new NodeCache({
 
 export const baileysConfig = {
   logger: pino({ level: "silent" }),
-  defaultQueryTimeoutMs: undefined,
-  printQRInTerminal: false, 
+  printQRInTerminal: false,
+  msgRetryCounterMap: {},
+  retryRequestDelayMs: 250,
+  markOnlineOnConnect: false,
+  emitOwnEvents: true,
+  patchMessageBeforeSending: (msg) => {
+      if (msg.contextInfo) delete msg.contextInfo.mentionedJid;
+          return msg;
+        },
+  appStateSyncInitialTimeoutMs: 10000,
   generateHighQualityLinkPreview: true
 }
 

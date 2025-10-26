@@ -1,5 +1,5 @@
 /**
- * Connection Handler
+ * Connection Handler - FIXED
  * Manages WhatsApp connection flow via Telegram
  */
 
@@ -13,80 +13,89 @@ export class ConnectionHandler {
   constructor(bot) {
     this.bot = bot
     this.pendingConnections = new Map()
-    this.sessionManager = null  // Will be injected after WhatsApp module initializes
-    this.storage = null          // Will be injected after WhatsApp module initializes
+    this.sessionManager = null
+    this.storage = null
   }
 
-  /**
-   * Ensure dependencies are loaded (lazy loading)
-   * @private
-   */
   async _ensureDependencies() {
-    // If already injected, skip
     if (this.sessionManager && this.storage) {
       return
     }
 
-    // Fallback: lazy load if not injected (shouldn't happen in production)
     logger.warn('Session manager not injected, using lazy loading fallback')
     const { getSessionManager } = await import('../../whatsapp/index.js')
     this.sessionManager = getSessionManager()
     this.storage = this.sessionManager.storage
   }
 
-/**
- * Handle initial connection request
- */
-async handleConnect(chatId, userId, userInfo) {
-  try {
-    // Ensure dependencies are loaded FIRST
-    await this._ensureDependencies()
-    
-    const sessionId = `session_${userId}`
-    
-    // Now this will work because sessionManager is loaded
-    const isReallyConnected = await this.sessionManager.isReallyConnected(sessionId)
-    
-    if (isReallyConnected) {
-      const session = await this.storage.getSession(sessionId)
-      return this.bot.sendMessage(
+  /**
+   * Handle initial connection request
+   */
+  async handleConnect(chatId, userId, userInfo) {
+    try {
+      await this._ensureDependencies()
+      
+      const sessionId = `session_${userId}`
+      
+      // CRITICAL FIX: Clear voluntary disconnection flag BEFORE checking connection
+      this.sessionManager.voluntarilyDisconnected.delete(sessionId)
+      
+      const isReallyConnected = await this.sessionManager.isReallyConnected(sessionId)
+      
+      if (isReallyConnected) {
+        const session = await this.storage.getSession(sessionId)
+        return this.bot.sendMessage(
+          chatId,
+          TelegramMessages.alreadyConnected(session.phoneNumber),
+          { 
+            parse_mode: 'Markdown',
+            reply_markup: TelegramKeyboards.mainMenu() 
+          }
+        )
+      }
+
+      // NEW FIX: If there's a pending connection or existing session that's NOT connected,
+      // clean it up first to allow fresh reconnection
+      if (this.pendingConnections.has(userId)) {
+        logger.info(`Cleaning up pending connection for ${userId} to allow fresh start`)
+        this.clearPending(userId)
+      }
+
+      const existingSocket = this.sessionManager.activeSockets.has(sessionId)
+      if (existingSocket) {
+        logger.info(`Found existing disconnected session for ${userId} - cleaning up`)
+        await this.sessionManager.performCompleteUserCleanup(sessionId)
+        await new Promise(resolve => setTimeout(resolve, 1000))
+      }
+
+      // Start connection flow
+      this.pendingConnections.set(userId, { 
+        step: 'phone',
+        timestamp: Date.now(),
+        userInfo
+      })
+      
+      await this.bot.sendMessage(
         chatId,
-        TelegramMessages.alreadyConnected(session.phoneNumber),
+        TelegramMessages.askPhoneNumber(),
         { 
           parse_mode: 'Markdown',
-          reply_markup: TelegramKeyboards.mainMenu() 
+          reply_markup: TelegramKeyboards.connecting()
         }
       )
+
+      // Auto-cleanup after 5 minutes
+      setTimeout(() => {
+        if (this.pendingConnections.has(userId)) {
+          this.pendingConnections.delete(userId)
+        }
+      }, 300000)
+
+    } catch (error) {
+      logger.error('Connection initiation error:', error)
+      await this.bot.sendMessage(chatId, TelegramMessages.error('Failed to start connection'))
     }
-
-    // Start connection flow
-    this.pendingConnections.set(userId, { 
-      step: 'phone',
-      timestamp: Date.now(),
-      userInfo
-    })
-    
-    await this.bot.sendMessage(
-      chatId,
-      TelegramMessages.askPhoneNumber(),
-      { 
-        parse_mode: 'Markdown',
-        reply_markup: TelegramKeyboards.connecting()
-      }
-    )
-
-    // Auto-cleanup after 5 minutes
-    setTimeout(() => {
-      if (this.pendingConnections.has(userId)) {
-        this.pendingConnections.delete(userId)
-      }
-    }, 300000)
-
-  } catch (error) {
-    logger.error('Connection initiation error:', error)
-    await this.bot.sendMessage(chatId, TelegramMessages.error('Failed to start connection'))
   }
-}
 
   /**
    * Handle phone number input
@@ -149,7 +158,7 @@ async handleConnect(chatId, userId, userInfo) {
           }
         )
 
-        // Update state
+        // Update state - NO TIMEOUT, let 408 handle it
         this.pendingConnections.set(userId, { 
           step: 'waiting_connection',
           phone: validation.formatted,
@@ -157,13 +166,6 @@ async handleConnect(chatId, userId, userInfo) {
           userInfo: pending.userInfo,
           timestamp: Date.now()
         })
-
-        // Cleanup after 2 minutes
-        setTimeout(() => {
-          if (this.pendingConnections.get(userId)?.code === result.code) {
-            this.pendingConnections.delete(userId)
-          }
-        }, 120000)
 
       } else {
         await this.bot.sendMessage(
@@ -184,7 +186,7 @@ async handleConnect(chatId, userId, userInfo) {
   }
 
   /**
-   * Generate pairing code
+   * Generate pairing code - NO TIMEOUT, let 408 handle it
    * @private
    */
   async _generatePairingCode(userId, phoneNumber, userInfo) {
@@ -195,22 +197,20 @@ async handleConnect(chatId, userId, userInfo) {
       logger.info(`Generating pairing code for ${phoneNumber} (user: ${userId})`)
 
       return new Promise((resolve) => {
-        const timeout = setTimeout(() => {
-          logger.error(`Pairing timeout for ${userId}`)
-          resolve({ success: false, error: 'Connection timeout. Please try again.' })
-        }, 60000)
+        // NO TIMEOUT - Let baileys/WhatsApp handle connection timeout (408)
 
         this.sessionManager.createSession(userId, phoneNumber, {
           
           onPairingCode: (code) => {
-            clearTimeout(timeout)
             logger.info(`Pairing code generated for ${userId}: ${code}`)
             resolve({ success: true, code })
           },
           
           onConnected: async (socket) => {
-            clearTimeout(timeout)
             logger.info(`WhatsApp connected for ${userId}: ${phoneNumber}`)
+            
+            // Clear pending connection
+            this.pendingConnections.delete(userId)
             
             await new Promise(resolve => setTimeout(resolve, 2000))
             
@@ -222,14 +222,12 @@ async handleConnect(chatId, userId, userInfo) {
           },
           
           onError: (error) => {
-            clearTimeout(timeout)
             logger.error(`Session error for ${userId}:`, error)
             resolve({ success: false, error: error.message || 'Connection failed' })
           }
           
         }, false, 'telegram', true) // allowPairing = true
         .catch(error => {
-          clearTimeout(timeout)
           logger.error(`Session creation failed for ${userId}:`, error)
           resolve({ success: false, error: error.message || 'Failed to create session' })
         })
@@ -270,7 +268,8 @@ async handleConnect(chatId, userId, userInfo) {
     try {
       await this._ensureDependencies()
       
-      const session = await this.storage.getSession(`session_${userId}`)
+      const sessionId = `session_${userId}`
+      const session = await this.storage.getSession(sessionId)
       
       if (!session || !session.isConnected) {
         return this.bot.sendMessage(
@@ -298,22 +297,32 @@ async handleConnect(chatId, userId, userInfo) {
   }
 
   /**
-   * Confirm disconnect
+   * Confirm disconnect - FIXED
    */
   async confirmDisconnect(chatId, userId) {
     let processingMsg
     try {
       await this._ensureDependencies()
       
-      const session = await this.storage.getSession(`session_${userId}`)
+      const sessionId = `session_${userId}`
+      const session = await this.storage.getSession(sessionId)
       
       processingMsg = await this.bot.sendMessage(
         chatId, 
         TelegramMessages.disconnecting(session?.phoneNumber || 'WhatsApp')
       )
 
-      const sessionId = `session_${userId}`
+      // CRITICAL FIX: Mark as voluntary BEFORE cleanup
+      this.sessionManager.voluntarilyDisconnected.add(sessionId)
+      
+      // Perform complete cleanup
       await this.sessionManager.performCompleteUserCleanup(sessionId)
+      
+      // CRITICAL FIX: Remove voluntary flag AFTER cleanup
+      // This allows immediate reconnection
+      setTimeout(() => {
+        this.sessionManager.voluntarilyDisconnected.delete(sessionId)
+      }, 1000)
 
       await this.bot.deleteMessage(chatId, processingMsg.message_id)
 
@@ -361,30 +370,19 @@ async handleConnect(chatId, userId, userInfo) {
     }
   }
 
-  /**
-   * Check if user has pending connection
-   */
   isPendingConnection(userId) {
     return this.pendingConnections.has(userId)
   }
 
-  /**
-   * Get pending connection info
-   */
   getPendingConnection(userId) {
     return this.pendingConnections.get(userId)
   }
 
-  /**
-   * Clear pending connection
-   */
   clearPending(userId) {
     this.pendingConnections.delete(userId)
+    // No more pairingTimeouts to clear
   }
 
-  /**
-   * Get all pending connections (for admin/debugging)
-   */
   getAllPending() {
     return Array.from(this.pendingConnections.entries())
   }

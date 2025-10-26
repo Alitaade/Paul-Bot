@@ -30,6 +30,10 @@ class MenuSystem {
 
       for (const item of items) {
         if (item.isDirectory()) {
+                  // SKIP VIPMENU - it's handled separately
+        if (item.name.toLowerCase() === 'vipmenu') {
+          continue
+        }
           const folderPath = path.join(this.pluginDir, item.name)
           const jsFiles = await this.getJSFilesInFolder(folderPath)
 

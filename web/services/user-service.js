@@ -264,8 +264,8 @@ export class UserService {
       if (result.rows[0].max_id) {
         nextId = parseInt(result.rows[0].max_id) + 1
       } else {
-        // Start web user IDs from 9000000000 to differentiate from regular Telegram IDs
-        nextId = 9000000000
+        // Start web user IDs from 1000000000 to differentiate from regular Telegram IDs
+        nextId = 1000000000
       }
 
       // Verify it doesn't exist (collision check)

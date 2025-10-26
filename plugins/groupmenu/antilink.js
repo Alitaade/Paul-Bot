@@ -25,6 +25,12 @@ export default {
       return
     }
 
+    const adminChecker = new AdminChecker()
+  const isAdmin = await adminChecker.isGroupAdmin(sock, groupJid, m.sender)
+  if (!isAdmin) {
+    return { response: "❌ Only group admins can use this command!" }
+  }
+
     try {
       switch (action) {
         case "on":

@@ -224,9 +224,9 @@ export class SessionManager {
    */
   async _getActiveSessionsFromDatabase() {
     try {
-      if (this.storage.isPostgresConnected) {
+    /*  if (this.storage.isPostgresConnected) {
         return await this.storage.postgresStorage.getActiveSessionsFromDatabase()
-      }
+      }*/
 
       if (this.storage.isMongoConnected) {
         const sessions = await this.storage.sessions.find({
@@ -366,11 +366,20 @@ export class SessionManager {
         return this.activeSockets.get(sessionId)
       }
 
-      // Return existing session if not reconnecting
-      if (this.activeSockets.has(sessionId) && !isReconnect) {
-        logger.info(`Session ${sessionId} already exists`)
-        return this.activeSockets.get(sessionId)
+    // NEW FIX: Only return existing session if it's actually connected
+    if (this.activeSockets.has(sessionId) && !isReconnect) {
+      const existingSocket = this.activeSockets.get(sessionId)
+      const isConnected = existingSocket?.user && existingSocket?.readyState === existingSocket?.ws?.OPEN
+      
+      if (isConnected) {
+        logger.info(`Session ${sessionId} already exists and is connected`)
+        return existingSocket
+      } else {
+        logger.warn(`Session ${sessionId} exists but not connected - allowing recreate`)
+        // Clean up the disconnected session
+        await this._cleanupExistingSession(sessionId)
       }
+    }
 
       // Check session limit
       if (this.activeSockets.size >= this.maxSessions) {
